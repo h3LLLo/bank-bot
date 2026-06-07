@@ -21,7 +21,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# ======================================================
+# ЗАМЕНИТЕ GROQ_API_KEY на ANTHROPIC_API_KEY в Render!
+# ======================================================
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
 WEBHOOK_URL = "https://bank-bot-w89l.onrender.com"
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -348,127 +353,6 @@ def append_rows_from_col_a(sheet, rows):
     sheet.update(range_name=range_name, values=rows, value_input_option="USER_ENTERED")
     return start_row
 
-# ============ GROQ AI ============
-def get_sheets_data_for_ai():
-    try:
-        spreadsheet = get_spreadsheet()
-        реестр = spreadsheet.worksheet(SHEET_NAME)
-        data = реестр.get_all_values()
-        initial_balances = {}
-        try:
-            справка = spreadsheet.worksheet("Счета2026(Справка)")
-            справка_data = справка.get_all_values()
-            for row in справка_data:
-                if row and row[0].strip() and len(row) > 1:
-                    name = row[0].strip()
-                    bal = parse_справка_num(row[1])
-                    if bal is not None:
-                        initial_balances[name] = bal
-        except:
-            pass
-        if len(data) < 2:
-            return "Данных в таблице пока нет."
-        rows = data[1:]
-        month_totals = {}
-        account_totals = {}
-        article_totals = {}
-        for row in rows:
-            try:
-                month = row[1] if len(row) > 1 else ""
-                amount_str = row[4] if len(row) > 4 else "0"
-                account = row[6] if len(row) > 6 else ""
-                article = row[7] if len(row) > 7 else ""
-                amount = parse_amount_from_registry(amount_str)
-                if amount is None:
-                    continue
-                if month:
-                    month_totals[month] = month_totals.get(month, 0) + amount
-                if account:
-                    account_totals[account] = account_totals.get(account, 0) + amount
-                if article:
-                    article_totals[article] = article_totals.get(article, 0) + amount
-            except:
-                continue
-        month_names = {
-            "1":"Январь","2":"Февраль","3":"Март","4":"Апрель",
-            "5":"Май","6":"Июнь","7":"Июль","8":"Август",
-            "9":"Сентябрь","10":"Октябрь","11":"Ноябрь","12":"Декабрь"
-        }
-        summary = f"Всего строк в реестре: {len(rows)}\n\n"
-        summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
-        for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
-            name = month_names.get(m, f"Месяц {m}")
-            summary += f"  {name}: {month_totals[m]:,.0f} ₸\n"
-        summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
-        total_all = 0.0
-        for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
-            initial = 0.0
-            best_score = 0.0
-            for name, bal in initial_balances.items():
-                if name.lower() == acc.lower():
-                    initial = bal
-                    break
-                score = _account_similarity(acc, name)
-                if score > best_score and score >= 0.7:
-                    best_score = score
-                    initial = bal
-            current = initial + ops_total
-            total_all += current
-            summary += f"  {acc}: {current:,.0f} ₸  (нач.остаток: {initial:,.0f} + обороты: {ops_total:,.0f})\n"
-        summary += f"  ИТОГО НА ВСЕХ СЧЕТАХ: {total_all:,.0f} ₸\n"
-        summary += "\nОБОРОТЫ ПО СЧЕТАМ (только операции без начального остатка):\n"
-        for acc, ops_total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
-            summary += f"  {acc}: {ops_total:,.0f} ₸\n"
-        summary += "\nПО СТАТЬЯМ:\n"
-        for art, total in sorted(article_totals.items(), key=lambda x: -abs(x[1])):
-            if art:
-                summary += f"  {art}: {total:,.0f} ₸\n"
-        return summary
-    except Exception as e:
-        return f"Ошибка получения данных: {e}"
-
-def ask_ai(question: str) -> str:
-    try:
-        sheets_data = get_sheets_data_for_ai()
-        today = datetime.now().strftime("%d.%m.%Y")
-        prompt = f"""Ты финансовый помощник компании. Сегодня {today}.
-
-{sheets_data}
-
-ВАЖНЫЕ ПРАВИЛА:
-- Отвечай ТОЛЬКО на русском языке
-- Отвечай КОРОТКО — только финальный ответ, без рассуждений
-- НЕ показывай свои вычисления, мысли, списки промежуточных шагов
-- НЕ повторяй данные реестра целиком
-- Если спрашивают остаток на счетах — дай цифры по каждому счёту и итог
-- Если данных недостаточно — скажи об этом коротко
-
-Вопрос пользователя: {question}
-
-Дай ТОЛЬКО финальный ответ на русском языке. Никаких рассуждений."""
-
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1000,
-            "temperature": 0.3
-        }
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers, json=payload, timeout=30
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        text = result["choices"][0]["message"].get("content") or "Нет ответа"
-        return text.strip()
-    except Exception as e:
-        logger.error(f"Groq error: {e}")
-        return f"❌ Ошибка ИИ: {str(e)}"
-
 # ============ СВЕРКА ОСТАТКОВ ============
 ACCOUNT_SYNONYMS = {
     "халык":       ["халык", "народный", "halyk", "hsbk"],
@@ -639,6 +523,619 @@ def get_account_rows(account_name):
             matched.append((i, row))
     return matched
 
+# ============ ДАННЫЕ ДЛЯ ИИ ============
+
+def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=100):
+    """Возвращает сводку + детальные строки для Claude."""
+    try:
+        spreadsheet = get_spreadsheet()
+        реестр = spreadsheet.worksheet(SHEET_NAME)
+        data = реестр.get_all_values()
+
+        initial_balances = {}
+        try:
+            справка = spreadsheet.worksheet("Счета2026(Справка)")
+            справка_data = справка.get_all_values()
+            for row in справка_data:
+                if row and row[0].strip() and len(row) > 1:
+                    name = row[0].strip()
+                    bal = parse_справка_num(row[1])
+                    if bal is not None:
+                        initial_balances[name] = bal
+        except:
+            pass
+
+        if len(data) < 2:
+            return "Данных в таблице пока нет.", []
+
+        rows = data[1:]
+        month_totals = {}
+        account_totals = {}
+        article_totals = {}
+        detail_rows = []
+
+        month_names = {
+            "1":"Январь","2":"Февраль","3":"Март","4":"Апрель",
+            "5":"Май","6":"Июнь","7":"Июль","8":"Август",
+            "9":"Сентябрь","10":"Октябрь","11":"Ноябрь","12":"Декабрь"
+        }
+
+        for row in rows:
+            try:
+                month = row[1] if len(row) > 1 else ""
+                amount_str = row[4] if len(row) > 4 else "0"
+                account = row[6] if len(row) > 6 else ""
+                article = row[7] if len(row) > 7 else ""
+                date_str = row[3] if len(row) > 3 else ""
+                desc = row[8] if len(row) > 8 else ""
+                amount = parse_amount_from_registry(amount_str)
+                if amount is None:
+                    continue
+
+                if month:
+                    month_totals[month] = month_totals.get(month, 0) + amount
+                if account:
+                    account_totals[account] = account_totals.get(account, 0) + amount
+                if article:
+                    article_totals[article] = article_totals.get(article, 0) + amount
+
+                # Фильтрация для детальных строк
+                match = True
+                if filter_account and filter_account.lower() not in account.lower():
+                    match = False
+                if filter_month and str(filter_month) != str(month):
+                    match = False
+                if match:
+                    detail_rows.append({
+                        "дата": date_str,
+                        "месяц": month_names.get(month, month),
+                        "счёт": account,
+                        "сумма": amount_str,
+                        "статья": article,
+                        "описание": desc[:80] if desc else "",
+                    })
+            except:
+                continue
+
+        # Сводка
+        summary = f"Всего строк в реестре: {len(rows)}\n\n"
+        summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
+        for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
+            name = month_names.get(m, f"Месяц {m}")
+            summary += f"  {name}: {month_totals[m]:,.0f} ₸\n"
+
+        summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
+        total_all = 0.0
+        for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
+            initial = 0.0
+            best_score = 0.0
+            for name, bal in initial_balances.items():
+                if name.lower() == acc.lower():
+                    initial = bal
+                    break
+                score = _account_similarity(acc, name)
+                if score > best_score and score >= 0.7:
+                    best_score = score
+                    initial = bal
+            current = initial + ops_total
+            total_all += current
+            summary += f"  {acc}: {current:,.0f} ₸  (нач.: {initial:,.0f} + обороты: {ops_total:,.0f})\n"
+        summary += f"  ИТОГО НА ВСЕХ СЧЕТАХ: {total_all:,.0f} ₸\n"
+
+        summary += "\nОБОРОТЫ ПО СЧЕТАМ:\n"
+        for acc, ops_total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
+            summary += f"  {acc}: {ops_total:,.0f} ₸\n"
+
+        summary += "\nПО СТАТЬЯМ:\n"
+        for art, total in sorted(article_totals.items(), key=lambda x: -abs(x[1])):
+            if art:
+                summary += f"  {art}: {total:,.0f} ₸\n"
+
+        detail_rows = detail_rows[:limit_rows]
+        return summary, detail_rows
+
+    except Exception as e:
+        return f"Ошибка получения данных: {e}", []
+
+# ============ CLAUDE AI ============
+
+def ask_ai(question: str) -> str:
+    """
+    Claude API с двумя инструментами:
+    - get_table_data: финансовые данные из Google Sheets
+    - web_search: поиск в интернете (погода, курсы и т.д.)
+    """
+    if not ANTHROPIC_API_KEY:
+        return "❌ ANTHROPIC_API_KEY не задан. Добавьте его в переменные окружения на Render."
+
+    today = datetime.now().strftime("%d.%m.%Y")
+
+    tools = [
+        {
+            "name": "get_table_data",
+            "description": (
+                "Получить финансовые данные из Google Sheets реестра транзакций компании. "
+                "Возвращает сводку (итоги по месяцам, счетам, статьям) и детальные строки. "
+                "Используй для вопросов о финансах, остатках, оборотах, расходах, доходах."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "filter_account": {
+                        "type": "string",
+                        "description": "Фильтр по счёту (например 'Каспи', 'БЦК'). Пусто = все счета."
+                    },
+                    "filter_month": {
+                        "type": "string",
+                        "description": "Номер месяца (1-12). Пусто = все месяцы."
+                    },
+                    "limit_rows": {
+                        "type": "integer",
+                        "description": "Количество детальных строк (по умолчанию 100, максимум 300).",
+                        "default": 100
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "web_search",
+            "description": (
+                "Поиск актуальной информации в интернете. "
+                "Используй для вопросов о погоде, курсах валют, новостях и любой "
+                "информации не связанной с таблицей компании."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Поисковый запрос."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    ]
+
+    system_prompt = (
+        f"Ты финансовый помощник компании. Сегодня {today}. "
+        "Отвечай на финансовые вопросы через get_table_data, "
+        "на общие вопросы (погода, курсы, новости) — через web_search. "
+        "Отвечай ТОЛЬКО на русском языке. Будь кратким и точным."
+    )
+
+    messages = [{"role": "user", "content": question}]
+
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    for _ in range(5):
+        payload = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1500,
+            "system": system_prompt,
+            "tools": tools,
+            "messages": messages,
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers, json=payload, timeout=45,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        except Exception as e:
+            logger.error(f"Claude API error: {e}")
+            return f"❌ Ошибка Claude API: {str(e)}"
+
+        stop_reason = result.get("stop_reason")
+        content = result.get("content", [])
+
+        if stop_reason == "end_turn":
+            text_parts = [b["text"] for b in content if b.get("type") == "text"]
+            return "\n".join(text_parts).strip() or "Нет ответа."
+
+        if stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": content})
+            tool_results = []
+
+            for block in content:
+                if block.get("type") != "tool_use":
+                    continue
+                tool_name = block["name"]
+                tool_input = block.get("input", {})
+                tool_use_id = block["id"]
+                logger.info(f"Claude tool: {tool_name} {tool_input}")
+
+                if tool_name == "get_table_data":
+                    filter_account = tool_input.get("filter_account") or None
+                    filter_month = tool_input.get("filter_month") or None
+                    limit_rows = min(int(tool_input.get("limit_rows", 100)), 300)
+                    summary, detail_rows = get_sheets_data_for_ai(
+                        filter_account=filter_account,
+                        filter_month=filter_month,
+                        limit_rows=limit_rows,
+                    )
+                    if detail_rows:
+                        detail_text = "\n\nДЕТАЛЬНЫЕ СТРОКИ:\n"
+                        for r in detail_rows:
+                            detail_text += (
+                                f"  [{r['дата']}] {r['счёт']} | {r['сумма']} ₸"
+                                f" | {r['статья']} | {r['описание']}\n"
+                            )
+                    else:
+                        detail_text = "\n(По заданному фильтру строк не найдено)"
+                    result_content = summary + detail_text
+
+                elif tool_name == "web_search":
+                    query = tool_input.get("query", "")
+                    result_content = _do_web_search(query)
+
+                else:
+                    result_content = f"Инструмент '{tool_name}' не найден."
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": result_content,
+                })
+
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            text_parts = [b["text"] for b in content if b.get("type") == "text"]
+            return "\n".join(text_parts).strip() or "Нет ответа."
+
+    return "❌ Превышено число итераций. Попробуйте переформулировать вопрос."
+
+
+def _do_web_search(query: str) -> str:
+    """Поиск через DuckDuckGo Instant Answer API (бесплатно, без ключа)."""
+    try:
+        url = "https://api.duckduckgo.com/"
+        params = {"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"}
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+
+        results = []
+        abstract = data.get("AbstractText", "").strip()
+        if abstract:
+            results.append(f"Краткий ответ: {abstract}")
+        answer = data.get("Answer", "").strip()
+        if answer:
+            results.append(f"Ответ: {answer}")
+        for item in data.get("RelatedTopics", [])[:3]:
+            if isinstance(item, dict) and item.get("Text"):
+                results.append(item["Text"])
+
+        return "\n".join(results) if results else f"По запросу '{query}' ничего не найдено."
+    except Exception as e:
+        return f"Ошибка поиска: {str(e)}"
+
+# ============ PDF Kaspi Gold ============
+def _parse_kaspi_text_lines(all_text, account):
+    rows = []
+    lines = all_text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        m = re.match(
+            r'^(\d{2}\.\d{2}\.\d{2,4})\s+([+\-])\s*([\d\s]+,\d{2})\s*₸\s+(.+)$',
+            line
+        )
+        if m:
+            date_raw = m.group(1)
+            sign = 1 if m.group(2) == '+' else -1
+            amt_str = m.group(3).replace(" ", "").replace(",", ".")
+            desc = m.group(4).strip()
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt:
+                    j += 1
+                    continue
+                if re.match(r'^\d{2}\.\d{2}\.\d{2,4}', nxt):
+                    break
+                if re.match(r'^\([-+]?\s*[\d\s]+[,.][\d]+\s*(USD|EUR|RUB|CNY)\)', nxt, re.IGNORECASE):
+                    desc = f"{desc} {nxt}".strip()
+                    j += 1
+                    continue
+                if nxt.startswith("("):
+                    j += 1
+                    continue
+                desc = f"{desc} {nxt}".strip()
+                j += 1
+                break
+            i = j
+            try:
+                amount = sign * float(amt_str)
+                date_str = format_date(date_raw)
+                rows.append(make_row(date_str, amount, account, desc))
+            except:
+                pass
+        else:
+            i += 1
+    return rows
+
+def process_kaspi_gold_pdf(file_bytes):
+    rows = []
+    account = "Арман каспи голд"
+    closing_balance = None
+    opening_balance = None
+
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        first_text = pdf.pages[0].extract_text() or ""
+        all_text = ""
+        for p in pdf.pages:
+            all_text += (p.extract_text() or "") + "\n"
+
+        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
+
+        m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", all_text)
+        if not m_iban:
+            m_iban = re.search(r"счет[оом]*\s+(KZ\w+)", all_text, re.IGNORECASE)
+        if m_iban:
+            iban = m_iban.group(1).strip()
+            account = IBAN_MAP.get(iban, account)
+        elif "KZ97722C000015235365" in all_text:
+            account = IBAN_MAP.get("KZ97722C000015235365", account)
+        elif "KZ19722RU00001041014" in all_text:
+            account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
+
+        if not is_deposit:
+            bal_matches = re.findall(
+                r"Доступно на\s+(\d{2}\.\d{2}\.\d{2,4})[:\s]*[+\-]?\s*([\d\s]+,\d+)\s*₸",
+                all_text
+            )
+            if len(bal_matches) >= 2:
+                opening_balance = parse_num(bal_matches[0][1])
+                closing_balance = parse_num(bal_matches[-1][1])
+            elif len(bal_matches) == 1:
+                closing_balance = parse_num(bal_matches[0][1])
+
+            rows = _parse_kaspi_text_lines(all_text, account)
+
+            if not rows:
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        for row in table:
+                            if not row or len(row) < 3:
+                                continue
+                            date_cell = str(row[0] or "").strip()
+                            amount_cell = str(row[1] or "").strip()
+                            op_cell = str(row[2] or "").strip() if len(row) > 2 else ""
+                            det_cell = str(row[3] or "").strip() if len(row) > 3 else ""
+                            desc_cell = f"{op_cell} {det_cell}".strip()
+                            if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
+                                continue
+                            amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
+                            sign = 1
+                            if amount_clean.startswith("-"):
+                                sign = -1
+                                amount_clean = amount_clean[1:]
+                            elif amount_clean.startswith("+"):
+                                amount_clean = amount_clean[1:]
+                            try:
+                                amount = sign * float(amount_clean)
+                            except:
+                                continue
+                            date_str = format_date(date_cell)
+                            rows.append(make_row(date_str, amount, account, desc_cell))
+        else:
+            dep_matches = re.findall(
+                r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
+                all_text
+            )
+            if len(dep_matches) >= 2:
+                opening_balance = parse_num(dep_matches[0])
+                closing_balance = parse_num(dep_matches[-1])
+            elif len(dep_matches) == 1:
+                closing_balance = parse_num(dep_matches[0])
+            rows = _parse_kaspi_text_lines(all_text, account)
+
+    if opening_balance is None and closing_balance is not None and rows:
+        total_ops = sum(float(r[4]) for r in rows)
+        opening_balance = round(closing_balance - total_ops, 2)
+
+    logger.info(f"Kaspi Gold: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
+    return rows, account, closing_balance, opening_balance
+
+# ============ PDF BCC ============
+def process_bcc_pdf(file_bytes):
+    rows = []
+    iban = ""
+    account = "БЦК Ип Серик"
+    closing_balance = None
+    opening_balance = None
+
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            full_text += (page.extract_text() or "") + "\n"
+
+        m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
+        if not m:
+            m = re.search(r"ЖСК\s*/\s*ИИК\s+(KZ\w+)", full_text)
+        if not m:
+            m = re.search(r"IBAN[:\s]+(KZ\w+)", full_text)
+        if m:
+            iban = m.group(1).strip()
+            account = IBAN_MAP.get(iban, iban)
+
+        m_open = re.search(r"[Кк]іріс [қк]алдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        if not m_open:
+            m_open = re.search(r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        if m_open:
+            opening_balance = parse_num(m_open.group(1))
+
+        m_bal = re.search(r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        if not m_bal:
+            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        if not m_bal:
+            m_bal = re.search(r"[Шш]ығыс сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        if m_bal:
+            closing_balance = parse_num(m_bal.group(1))
+
+        all_table_rows = []
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if row and len(row) >= 12:
+                        all_table_rows.append(list(row))
+
+        merged_rows = []
+        i = 0
+        while i < len(all_table_rows):
+            row = all_table_rows[i]
+            c0 = str(row[0] or "").replace("\n", "").strip()
+            c1 = str(row[1] or "").replace("\n", "").strip()
+            if "итого" in c0.lower() or "жиынтығы" in c0.lower():
+                i += 1
+                continue
+            if "дата" in c1.lower() or "күні" in c1.lower() or "реттік" in c0.lower():
+                i += 1
+                continue
+            if c0 == "NT-" and i + 1 < len(all_table_rows):
+                next_row = all_table_rows[i + 1]
+                nc0 = str(next_row[0] or "").replace("\n", "").strip()
+                if re.match(r"^\d+$", nc0):
+                    glued = []
+                    for ci in range(12):
+                        pv = str(row[ci] or "").replace("\n", " ").strip()
+                        nv = str(next_row[ci] or "").replace("\n", " ").strip()
+                        if ci == 0:
+                            glued.append("NT-" + nc0)
+                        elif ci == 1:
+                            if re.search(r"\d{1,2}\.\d{2}\.\d{4}", pv):
+                                glued.append(pv)
+                            elif re.search(r"\d{1,2}\.\d{2}\.\d{4}", nv):
+                                glued.append(nv)
+                            else:
+                                glued.append((pv + nv).strip())
+                        elif ci in (7, 8):
+                            combined = (pv + nv).replace(" ", "")
+                            glued.append(combined)
+                        else:
+                            glued.append((pv + " " + nv).strip() if (pv and nv) else (pv or nv))
+                    merged_rows.append(glued)
+                    i += 2
+                    continue
+            merged_rows.append(row)
+            i += 1
+
+        for row in merged_rows:
+            c0 = str(row[0] or "").replace("\n", "").strip()
+            c1 = str(row[1] or "").replace("\n", "").strip()
+            c7 = str(row[7] or "").replace("\n", " ").strip()
+            c8 = str(row[8] or "").replace("\n", " ").strip()
+            c11 = str(row[11] or "").replace("\n", " ").strip()
+            c7 = re.sub(r'\(.*?(?:USD|EUR|RUB|CNY).*?\)', '', c7, flags=re.IGNORECASE).strip()
+            c8 = re.sub(r'\(.*?(?:USD|EUR|RUB|CNY).*?\)', '', c8, flags=re.IGNORECASE).strip()
+            if "итого" in c1.lower() or "жиынтығы" in c1.lower():
+                continue
+            date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", c1)
+            if not date_m:
+                continue
+            day = int(date_m.group(1))
+            month = int(date_m.group(2))
+            year = date_m.group(3)
+            date_str = f"{month:02d}/{day:02d}/{year}"
+            debit = parse_num(c7)
+            credit = parse_num(c8)
+            if debit > 0:
+                amount = -debit
+            elif credit > 0:
+                amount = credit
+            else:
+                continue
+            desc = f"{c0} {c11}".strip() if c0 else c11
+            rows.append(make_row(date_str, amount, account, desc))
+
+    logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
+    return rows, account, closing_balance, opening_balance
+
+# ============ PDF Halyk ============
+def parse_kz_num(s):
+    s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
+    s = re.sub(r",(\d{3})(?=[\d,.])", r"\1", s)
+    s = s.replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return 0
+
+def process_halyk_pdf(file_bytes):
+    rows = []
+    account = "Народный банк Ип Серик"
+    closing_balance = None
+    opening_balance = None
+
+    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            full_text += (page.extract_text() or "") + "\n"
+
+    m_iban = re.search(r"Счет\(Валюта\)[:\s]+(KZ[\w]+)", full_text)
+    if m_iban:
+        iban = m_iban.group(1).strip()
+        account = IBAN_MAP.get(iban, account)
+
+    m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
+    if m_open:
+        opening_balance = parse_kz_num(m_open.group(1))
+
+    m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
+    if m_bal:
+        closing_balance = parse_kz_num(m_bal.group(1))
+
+    lines = full_text.split("\n")
+    blocks = []
+    current = []
+    for line in lines:
+        line = line.strip()
+        if re.match(r"^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}", line):
+            if current:
+                blocks.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    for block in blocks:
+        first = block[0]
+        full_desc = " ".join(block)
+        m = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+\S+\s+([\d,]+\.\d{2})", first)
+        if not m:
+            continue
+        date_raw = m.group(1)
+        amount = parse_kz_num(m.group(2))
+        desc_lower = full_desc.lower()
+        if any(kw in desc_lower for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
+            amount = -amount
+        d, mo, y = date_raw.split(".")
+        date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
+        doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
+        doc_num = doc_num_m.group(1) if doc_num_m else ""
+        ubs_m = re.search(r'00UBS(\d+)', full_desc)
+        ubs_num = ("00UBS" + ubs_m.group(1)) if ubs_m else ""
+        clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
+        if ubs_num:
+            desc_with_docnum = f"{ubs_num} {doc_num} {clean_desc}".strip()
+        elif doc_num:
+            desc_with_docnum = f"{doc_num} {clean_desc}".strip()
+        else:
+            desc_with_docnum = clean_desc
+        rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
+
+    return rows, account, closing_balance, opening_balance
+
 # ============ XLSX ============
 def process_xlsx(file_bytes):
     rows = []
@@ -722,356 +1219,6 @@ def process_xlsx(file_bytes):
 
     return rows, account, closing_balance, opening_balance
 
-# ============ PDF Kaspi Gold ============
-def _parse_kaspi_text_lines(all_text, account):
-    """
-    Текстовый парсер для Каспи Gold/депозит выписок.
-    Формат строки: DD.MM.YY [+/-] сумма ₸ Операция Детали
-    Строки вида "(- 66,00 USD)" добавляются в описание предыдущей операции.
-    """
-    rows = []
-    lines = all_text.split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        m = re.match(
-            r'^(\d{2}\.\d{2}\.\d{2,4})\s+([+\-])\s*([\d\s]+,\d{2})\s*₸\s+(.+)$',
-            line
-        )
-        if m:
-            date_raw = m.group(1)
-            sign = 1 if m.group(2) == '+' else -1
-            amt_str = m.group(3).replace(" ", "").replace(",", ".")
-            desc = m.group(4).strip()
-
-            # Смотрим следующие строки — могут быть продолжение описания или USD
-            j = i + 1
-            while j < len(lines):
-                nxt = lines[j].strip()
-                if not nxt:
-                    j += 1
-                    continue
-                # Если следующая строка — новая операция, останавливаемся
-                if re.match(r'^\d{2}\.\d{2}\.\d{2,4}', nxt):
-                    break
-                # Строка с валютой вида "(- 66,00 USD)" — добавляем в описание
-                if re.match(r'^\([-+]?\s*[\d\s]+[,.][\d]+\s*(USD|EUR|RUB|CNY)\)', nxt, re.IGNORECASE):
-                    desc = f"{desc} {nxt}".strip()
-                    j += 1
-                    continue
-                # Строка начинается с "(" но не валюта — пропускаем
-                if nxt.startswith("("):
-                    j += 1
-                    continue
-                # Обычное продолжение описания (напр. "своего счета")
-                desc = f"{desc} {nxt}".strip()
-                j += 1
-                break  # берём только одну строку продолжения
-
-            i = j  # прыгаем к следующей необработанной строке
-
-            try:
-                amount = sign * float(amt_str)
-                date_str = format_date(date_raw)
-                rows.append(make_row(date_str, amount, account, desc))
-            except:
-                pass
-        else:
-            i += 1
-    return rows
-
-def process_kaspi_gold_pdf(file_bytes):
-    rows = []
-    account = "Арман каспи голд"
-    closing_balance = None
-    opening_balance = None
-
-    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        first_text = pdf.pages[0].extract_text() or ""
-        all_text = ""
-        for p in pdf.pages:
-            all_text += (p.extract_text() or "") + "\n"
-
-        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
-
-        # Определяем счёт по IBAN
-        m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", all_text)
-        if not m_iban:
-            m_iban = re.search(r"счет[оом]*\s+(KZ\w+)", all_text, re.IGNORECASE)
-        if m_iban:
-            iban = m_iban.group(1).strip()
-            account = IBAN_MAP.get(iban, account)
-        elif "KZ97722C000015235365" in all_text:
-            account = IBAN_MAP.get("KZ97722C000015235365", account)
-        elif "KZ19722RU00001041014" in all_text:
-            account = IBAN_MAP.get("KZ19722RU00001041014", "Депозит Каспи Ип Серик")
-
-        if not is_deposit:
-            # Остаток: "Доступно на DD.MM.YY: + сумма ₸"
-            bal_matches = re.findall(
-                r"Доступно на\s+(\d{2}\.\d{2}\.\d{2,4})[:\s]*[+\-]?\s*([\d\s]+,\d+)\s*₸",
-                all_text
-            )
-            if len(bal_matches) >= 2:
-                opening_balance = parse_num(bal_matches[0][1])
-                closing_balance = parse_num(bal_matches[-1][1])
-            elif len(bal_matches) == 1:
-                closing_balance = parse_num(bal_matches[0][1])
-
-            # Текстовый парсинг (основной для этого формата PDF)
-            rows = _parse_kaspi_text_lines(all_text, account)
-
-            # Fallback на таблицы если текстовый не нашёл строки
-            if not rows:
-                for page in pdf.pages:
-                    tables = page.extract_tables()
-                    for table in tables:
-                        for row in table:
-                            if not row or len(row) < 3:
-                                continue
-                            date_cell = str(row[0] or "").strip()
-                            amount_cell = str(row[1] or "").strip()
-                            op_cell = str(row[2] or "").strip() if len(row) > 2 else ""
-                            det_cell = str(row[3] or "").strip() if len(row) > 3 else ""
-                            desc_cell = f"{op_cell} {det_cell}".strip()
-                            if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
-                                continue
-                            amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
-                            sign = 1
-                            if amount_clean.startswith("-"):
-                                sign = -1
-                                amount_clean = amount_clean[1:]
-                            elif amount_clean.startswith("+"):
-                                amount_clean = amount_clean[1:]
-                            try:
-                                amount = sign * float(amount_clean)
-                            except:
-                                continue
-                            date_str = format_date(date_cell)
-                            rows.append(make_row(date_str, amount, account, desc_cell))
-
-        else:
-            # Депозит
-            dep_matches = re.findall(
-                r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
-                all_text
-            )
-            if len(dep_matches) >= 2:
-                opening_balance = parse_num(dep_matches[0])
-                closing_balance = parse_num(dep_matches[-1])
-            elif len(dep_matches) == 1:
-                closing_balance = parse_num(dep_matches[0])
-
-            rows = _parse_kaspi_text_lines(all_text, account)
-
-    if opening_balance is None and closing_balance is not None and rows:
-        total_ops = sum(float(r[4]) for r in rows)
-        opening_balance = round(closing_balance - total_ops, 2)
-
-    logger.info(f"Kaspi Gold: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
-    return rows, account, closing_balance, opening_balance
-
-# ============ PDF BCC ============
-def process_bcc_pdf(file_bytes):
-    rows = []
-    iban = ""
-    account = "БЦК Ип Серик"
-    closing_balance = None
-    opening_balance = None
-
-    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        full_text = ""
-        for page in pdf.pages:
-            full_text += (page.extract_text() or "") + "\n"
-
-        m = re.search(r"ЖСК\s*/\s*ИИК\s*:\s*(KZ\w+)", full_text)
-        if not m:
-            m = re.search(r"ЖСК\s*/\s*ИИК\s+(KZ\w+)", full_text)
-        if not m:
-            m = re.search(r"IBAN[:\s]+(KZ\w+)", full_text)
-        if m:
-            iban = m.group(1).strip()
-            account = IBAN_MAP.get(iban, iban)
-
-        m_open = re.search(r"[Кк]іріс [қк]алдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
-        if not m_open:
-            m_open = re.search(r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
-        if m_open:
-            opening_balance = parse_num(m_open.group(1))
-
-        m_bal = re.search(r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
-        if not m_bal:
-            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
-        if not m_bal:
-            m_bal = re.search(r"[Шш]ығыс сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
-        if m_bal:
-            closing_balance = parse_num(m_bal.group(1))
-
-        all_table_rows = []
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    if row and len(row) >= 12:
-                        all_table_rows.append(list(row))
-
-        merged_rows = []
-        i = 0
-        while i < len(all_table_rows):
-            row = all_table_rows[i]
-            c0 = str(row[0] or "").replace("\n", "").strip()
-            c1 = str(row[1] or "").replace("\n", "").strip()
-
-            if "итого" in c0.lower() or "жиынтығы" in c0.lower():
-                i += 1
-                continue
-            if "дата" in c1.lower() or "күні" in c1.lower() or "реттік" in c0.lower():
-                i += 1
-                continue
-
-            if c0 == "NT-" and i + 1 < len(all_table_rows):
-                next_row = all_table_rows[i + 1]
-                nc0 = str(next_row[0] or "").replace("\n", "").strip()
-                if re.match(r"^\d+$", nc0):
-                    glued = []
-                    for ci in range(12):
-                        pv = str(row[ci] or "").replace("\n", " ").strip()
-                        nv = str(next_row[ci] or "").replace("\n", " ").strip()
-                        if ci == 0:
-                            glued.append("NT-" + nc0)
-                        elif ci == 1:
-                            if re.search(r"\d{1,2}\.\d{2}\.\d{4}", pv):
-                                glued.append(pv)
-                            elif re.search(r"\d{1,2}\.\d{2}\.\d{4}", nv):
-                                glued.append(nv)
-                            else:
-                                glued.append((pv + nv).strip())
-                        elif ci in (7, 8):
-                            combined = (pv + nv).replace(" ", "")
-                            glued.append(combined)
-                        else:
-                            glued.append((pv + " " + nv).strip() if (pv and nv) else (pv or nv))
-                    merged_rows.append(glued)
-                    i += 2
-                    continue
-
-            merged_rows.append(row)
-            i += 1
-
-        for row in merged_rows:
-            c0 = str(row[0] or "").replace("\n", "").strip()
-            c1 = str(row[1] or "").replace("\n", "").strip()
-            c7 = str(row[7] or "").replace("\n", " ").strip()
-            c8 = str(row[8] or "").replace("\n", " ").strip()
-            c11 = str(row[11] or "").replace("\n", " ").strip()
-
-            # Убираем валютную часть "(- 66,00 USD)" — берём только тенге
-            c7 = re.sub(r'\(.*?(?:USD|EUR|RUB|CNY).*?\)', '', c7, flags=re.IGNORECASE).strip()
-            c8 = re.sub(r'\(.*?(?:USD|EUR|RUB|CNY).*?\)', '', c8, flags=re.IGNORECASE).strip()
-
-            if "итого" in c1.lower() or "жиынтығы" in c1.lower():
-                continue
-
-            date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", c1)
-            if not date_m:
-                continue
-            day = int(date_m.group(1))
-            month = int(date_m.group(2))
-            year = date_m.group(3)
-            date_str = f"{month:02d}/{day:02d}/{year}"
-
-            debit = parse_num(c7)
-            credit = parse_num(c8)
-
-            if debit > 0:
-                amount = -debit
-            elif credit > 0:
-                amount = credit
-            else:
-                continue
-
-            desc = f"{c0} {c11}".strip() if c0 else c11
-            rows.append(make_row(date_str, amount, account, desc))
-
-    logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
-    return rows, account, closing_balance, opening_balance
-
-# ============ PDF Halyk ============
-def parse_kz_num(s):
-    s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
-    s = re.sub(r",(\d{3})(?=[\d,.])", r"\1", s)
-    s = s.replace(",", ".")
-    try:
-        return float(s)
-    except:
-        return 0
-
-def process_halyk_pdf(file_bytes):
-    rows = []
-    account = "Народный банк Ип Серик"
-    closing_balance = None
-    opening_balance = None
-
-    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        full_text = ""
-        for page in pdf.pages:
-            full_text += (page.extract_text() or "") + "\n"
-
-    m_iban = re.search(r"Счет\(Валюта\)[:\s]+(KZ[\w]+)", full_text)
-    if m_iban:
-        iban = m_iban.group(1).strip()
-        account = IBAN_MAP.get(iban, account)
-
-    m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
-    if m_open:
-        opening_balance = parse_kz_num(m_open.group(1))
-
-    m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
-    if m_bal:
-        closing_balance = parse_kz_num(m_bal.group(1))
-
-    lines = full_text.split("\n")
-    blocks = []
-    current = []
-    for line in lines:
-        line = line.strip()
-        if re.match(r"^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}", line):
-            if current:
-                blocks.append(current)
-            current = [line]
-        elif current:
-            current.append(line)
-    if current:
-        blocks.append(current)
-
-    for block in blocks:
-        first = block[0]
-        full_desc = " ".join(block)
-        m = re.match(r"^(\d{2}\.\d{2}\.\d{4})\s+\S+\s+([\d,]+\.\d{2})", first)
-        if not m:
-            continue
-        date_raw = m.group(1)
-        amount = parse_kz_num(m.group(2))
-        desc_lower = full_desc.lower()
-        if any(kw in desc_lower for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
-            amount = -amount
-        d, mo, y = date_raw.split(".")
-        date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
-        doc_num_m = re.match(r'^\d{2}\.\d{2}\.\d{4}\s+(\S+)\s+', first)
-        doc_num = doc_num_m.group(1) if doc_num_m else ""
-        ubs_m = re.search(r'00UBS(\d+)', full_desc)
-        ubs_num = ("00UBS" + ubs_m.group(1)) if ubs_m else ""
-        clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
-        if ubs_num:
-            desc_with_docnum = f"{ubs_num} {doc_num} {clean_desc}".strip()
-        elif doc_num:
-            desc_with_docnum = f"{doc_num} {clean_desc}".strip()
-        else:
-            desc_with_docnum = clean_desc
-        rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
-
-    return rows, account, closing_balance, opening_balance
-
 # ============ ОПРЕДЕЛЕНИЕ ТИПА PDF ============
 def detect_pdf_type(first_page_text):
     if "По Депозиту" in first_page_text or "На Депозите" in first_page_text or "KZ19722RU" in first_page_text:
@@ -1100,12 +1247,13 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "👋 Привет! Я бухгалтерский бот.\n\n"
                 "📎 Отправьте файл выписки (.xlsx или .pdf) — загружу в таблицу.\n\n"
-                "💬 Или задайте вопрос текстом, например:\n"
-                "• Какая разница между апрелем и маем?\n"
-                "• Сколько пришло за май?\n"
-                "• Какой счёт имеет наибольший оборот?\n\n"
+                "💬 Или задайте любой вопрос:\n"
+                "• Сколько пришло за май по счёту Каспи?\n"
+                "• Какой счёт имеет наибольший оборот?\n"
+                "• Какой курс доллара сейчас?\n"
+                "• Какая погода в Астане?\n\n"
                 "🔍 Команды:\n"
-                "/rows <название счёта> — показать все строки по счёту\n"
+                "/rows <название счёта> — показать строки по счёту\n"
                 "Пример: /rows Каспи ТОО"
             )
             return
@@ -1145,7 +1293,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             chunk_size = 50
             chunks = [matched[i:i+chunk_size] for i in range(0, len(matched), chunk_size)]
-
             for part_idx, chunk in enumerate(chunks):
                 lines = []
                 for sheet_row, row in chunk:
@@ -1154,13 +1301,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     desc = row[8] if len(row) > 8 else ""
                     desc_short = (desc[:40] + "…") if len(desc) > 40 else desc
                     lines.append(f"#{sheet_row} | {date} | {amount} | {desc_short}")
-
                 part_text = "\n".join(lines)
                 if part_idx == 0:
                     msg = header + part_text
                 else:
                     msg = f"(продолжение {part_idx+1}/{len(chunks)})\n" + part_text
-
                 await update.message.reply_text(msg)
             return
 
@@ -1210,7 +1355,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         time.sleep(2)
         sheet = get_sheet()
         existing_data = sheet.get_all_values()
-
         key_to_row, existing_keys = build_existing_keys(existing_data)
 
         dupe_sheet_rows = []
