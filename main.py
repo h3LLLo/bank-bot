@@ -704,7 +704,7 @@ def ask_ai(question: str) -> str:
 
     for _ in range(5):
         payload = {
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-5",
             "max_tokens": 1500,
             "system": system_prompt,
             "tools": tools,
