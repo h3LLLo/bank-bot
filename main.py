@@ -22,9 +22,6 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
 
-# ======================================================
-# ЗАМЕНИТЕ GROQ_API_KEY на ANTHROPIC_API_KEY в Render!
-# ======================================================
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 WEBHOOK_URL = "https://bank-bot-w89l.onrender.com"
@@ -526,7 +523,6 @@ def get_account_rows(account_name):
 # ============ ДАННЫЕ ДЛЯ ИИ ============
 
 def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=100):
-    """Возвращает сводку + детальные строки для Claude."""
     try:
         spreadsheet = get_spreadsheet()
         реестр = spreadsheet.worksheet(SHEET_NAME)
@@ -579,7 +575,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
                 if article:
                     article_totals[article] = article_totals.get(article, 0) + amount
 
-                # Фильтрация для детальных строк
                 match = True
                 if filter_account and filter_account.lower() not in account.lower():
                     match = False
@@ -597,7 +592,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             except:
                 continue
 
-        # Сводка
         summary = f"Всего строк в реестре: {len(rows)}\n\n"
         summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
         for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
@@ -640,11 +634,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
 # ============ CLAUDE AI ============
 
 def ask_ai(question: str) -> str:
-    """
-    Claude API с двумя инструментами:
-    - get_table_data: финансовые данные из Google Sheets
-    - web_search: поиск в интернете (погода, курсы и т.д.)
-    """
     if not ANTHROPIC_API_KEY:
         return "❌ ANTHROPIC_API_KEY не задан. Добавьте его в переменные окружения на Render."
 
@@ -794,7 +783,6 @@ def ask_ai(question: str) -> str:
 
 
 def _do_web_search(query: str) -> str:
-    """Поиск через DuckDuckGo Instant Answer API (бесплатно, без ключа)."""
     try:
         url = "https://api.duckduckgo.com/"
         params = {"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"}
@@ -1240,6 +1228,9 @@ def detect_pdf_type(first_page_text):
 
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     if update.message.text:
         question = update.message.text.strip()
 
@@ -1310,13 +1301,16 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await update.message.reply_text("🤔 Думаю...")
-        answer = ask_ai(question)
+        try:
+            answer = ask_ai(question)
+        except Exception as e:
+            logger.error(f"ask_ai error: {e}")
+            answer = f"❌ Ошибка ИИ: {str(e)}"
         await update.message.reply_text(answer)
         return
 
     doc = update.message.document
     if not doc:
-        await update.message.reply_text("Отправьте файл выписки (.xlsx или .pdf) или задайте вопрос текстом.")
         return
 
     fname = (doc.file_name or "").lower()
@@ -1429,10 +1423,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {e}")
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.Document.ALL, handle))
-    app.add_handler(MessageHandler(filters.TEXT, handle))
+    # Один обработчик для всех сообщений — это ключевое исправление
+    app.add_handler(MessageHandler(filters.ALL, handle))
     logger.info("Bot started!")
     app.run_webhook(
         listen="0.0.0.0",
