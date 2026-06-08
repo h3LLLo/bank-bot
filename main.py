@@ -545,9 +545,17 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             return "Данных в таблице пока нет.", []
 
         rows = data[1:]
+
+        # Общие итоги (по всем строкам, без фильтра)
         month_totals = {}
         account_totals = {}
         article_totals = {}
+
+        # Итоги только по отфильтрованным строкам
+        filtered_month_totals = {}
+        filtered_account_totals = {}
+        filtered_article_totals = {}
+
         detail_rows = []
 
         month_names = {
@@ -555,6 +563,8 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             "5":"Май","6":"Июнь","7":"Июль","8":"Август",
             "9":"Сентябрь","10":"Октябрь","11":"Ноябрь","12":"Декабрь"
         }
+
+        has_filter = bool(filter_month or filter_account)
 
         for row in rows:
             try:
@@ -568,6 +578,7 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
                 if amount is None:
                     continue
 
+                # Всегда считаем общие итоги (для справки)
                 if month:
                     month_totals[month] = month_totals.get(month, 0) + amount
                 if account:
@@ -575,12 +586,22 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
                 if article:
                     article_totals[article] = article_totals.get(article, 0) + amount
 
+                # Проверяем фильтр
                 match = True
                 if filter_account and filter_account.lower() not in account.lower():
                     match = False
                 if filter_month and str(filter_month) != str(month):
                     match = False
+
                 if match:
+                    # Считаем итоги по отфильтрованным строкам
+                    if month:
+                        filtered_month_totals[month] = filtered_month_totals.get(month, 0) + amount
+                    if account:
+                        filtered_account_totals[account] = filtered_account_totals.get(account, 0) + amount
+                    if article:
+                        filtered_article_totals[article] = filtered_article_totals.get(article, 0) + amount
+
                     detail_rows.append({
                         "дата": date_str,
                         "месяц": month_names.get(month, month),
@@ -592,14 +613,34 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             except:
                 continue
 
-        summary = f"Всего строк в реестре: {len(rows)}\n\n"
+        # Выбираем какие итоги показывать ИИ
+        use_month_totals    = filtered_month_totals    if has_filter else month_totals
+        use_account_totals  = filtered_account_totals  if has_filter else account_totals
+        use_article_totals  = filtered_article_totals  if has_filter else article_totals
+
+        # Формируем заголовок сводки
+        summary = f"Всего строк в реестре: {len(rows)}\n"
+        if has_filter:
+            filter_desc_parts = []
+            if filter_month:
+                filter_desc_parts.append(f"месяц={month_names.get(str(filter_month), filter_month)}")
+            if filter_account:
+                filter_desc_parts.append(f"счёт={filter_account}")
+            summary += f"Применён фильтр: {', '.join(filter_desc_parts)}\n"
+            summary += f"Строк по фильтру: {len(detail_rows)}\n"
+        summary += "\n"
+
         summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
-        for m in sorted(month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
-            name = month_names.get(m, f"Месяц {m}")
-            summary += f"  {name}: {month_totals[m]:,.0f} ₸\n"
+        if use_month_totals:
+            for m in sorted(use_month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
+                name = month_names.get(m, f"Месяц {m}")
+                summary += f"  {name}: {use_month_totals[m]:,.0f} ₸\n"
+        else:
+            summary += "  (нет данных)\n"
 
         summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
         total_all = 0.0
+        # Остатки всегда считаем по всей таблице (не по фильтру), это баланс счёта
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
             initial = 0.0
             best_score = 0.0
@@ -616,12 +657,18 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             summary += f"  {acc}: {current:,.0f} ₸  (нач.: {initial:,.0f} + обороты: {ops_total:,.0f})\n"
         summary += f"  ИТОГО НА ВСЕХ СЧЕТАХ: {total_all:,.0f} ₸\n"
 
-        summary += "\nОБОРОТЫ ПО СЧЕТАМ:\n"
-        for acc, ops_total in sorted(account_totals.items(), key=lambda x: -abs(x[1])):
+        summary += "\nОБОРОТЫ ПО СЧЕТАМ"
+        if has_filter:
+            summary += " (по фильтру)"
+        summary += ":\n"
+        for acc, ops_total in sorted(use_account_totals.items(), key=lambda x: -abs(x[1])):
             summary += f"  {acc}: {ops_total:,.0f} ₸\n"
 
-        summary += "\nПО СТАТЬЯМ:\n"
-        for art, total in sorted(article_totals.items(), key=lambda x: -abs(x[1])):
+        summary += "\nПО СТАТЬЯМ"
+        if has_filter:
+            summary += " (по фильтру)"
+        summary += ":\n"
+        for art, total in sorted(use_article_totals.items(), key=lambda x: -abs(x[1])):
             if art:
                 summary += f"  {art}: {total:,.0f} ₸\n"
 
@@ -645,18 +692,30 @@ def ask_ai(question: str) -> str:
             "description": (
                 "Получить финансовые данные из Google Sheets реестра транзакций компании. "
                 "Возвращает сводку (итоги по месяцам, счетам, статьям) и детальные строки. "
-                "Используй для вопросов о финансах, остатках, оборотах, расходах, доходах."
+                "Используй для вопросов о финансах, остатках, оборотах, расходах, доходах. "
+                "ВАЖНО: если вопрос касается конкретного месяца — обязательно передавай filter_month. "
+                "Если вопрос касается конкретного счёта — передавай filter_account. "
+                "Никогда не суммируй данные за разные месяцы если спрашивают про один месяц."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "filter_account": {
                         "type": "string",
-                        "description": "Фильтр по счёту (например 'Каспи', 'БЦК'). Пусто = все счета."
+                        "description": (
+                            "Фильтр по названию счёта (например 'Каспи', 'БЦК', 'Народный'). "
+                            "Пусто = все счета."
+                        )
                     },
                     "filter_month": {
                         "type": "string",
-                        "description": "Номер месяца (1-12). Пусто = все месяцы."
+                        "description": (
+                            "Номер месяца цифрой от 1 до 12. "
+                            "Январь=1, Февраль=2, Март=3, Апрель=4, Май=5, Июнь=6, "
+                            "Июль=7, Август=8, Сентябрь=9, Октябрь=10, Ноябрь=11, Декабрь=12. "
+                            "Пусто = все месяцы. "
+                            "ОБЯЗАТЕЛЬНО указывай если в вопросе упомянут конкретный месяц!"
+                        )
                     },
                     "limit_rows": {
                         "type": "integer",
@@ -688,10 +747,15 @@ def ask_ai(question: str) -> str:
     ]
 
     system_prompt = (
-        f"Ты финансовый помощник компании. Сегодня {today}. "
-        "Отвечай на финансовые вопросы через get_table_data, "
-        "на общие вопросы (погода, курсы, новости) — через web_search. "
-        "Отвечай ТОЛЬКО на русском языке. Будь кратким и точным."
+        f"Ты финансовый помощник компании. Сегодня {today}.\n"
+        "Правила:\n"
+        "1. На финансовые вопросы используй get_table_data.\n"
+        "2. КРИТИЧЕСКИ ВАЖНО: если вопрос про конкретный месяц (например 'за май', 'в апреле', 'за март') — "
+        "   ВСЕГДА передавай filter_month с номером этого месяца. НЕ оставляй filter_month пустым!\n"
+        "3. Если вопрос про конкретный счёт — передавай filter_account.\n"
+        "4. На общие вопросы (погода, курсы, новости) используй web_search.\n"
+        "5. Отвечай ТОЛЬКО на русском языке. Будь кратким и точным.\n"
+        "6. Никогда не суммируй данные за весь год если спрашивают про один месяц."
     )
 
     messages = [{"role": "user", "content": question}]
@@ -1426,7 +1490,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    # Один обработчик для всех сообщений — это ключевое исправление
     app.add_handler(MessageHandler(filters.ALL, handle))
     logger.info("Bot started!")
     app.run_webhook(
@@ -1439,4 +1502,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
