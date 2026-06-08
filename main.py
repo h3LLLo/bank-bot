@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -916,18 +915,32 @@ def _is_balance_search_question(text: str) -> bool:
     return any(kw in t for kw in BALANCE_SEARCH_KEYWORDS)
 
 
+# ============ ИСПРАВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА СУММЫ ============
+
 def _extract_amount_from_question(text: str):
-    cleaned = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
-    amounts = re.findall(r'\d[\d\s,\.]*\d|\d+', cleaned)
+    # Мультипроход: убираем все пробелы между цифрами (1 000 000 -> 1000000)
+    cleaned = text
+    for _ in range(6):
+        new = re.sub(r'(\d)\s+(\d)', r'\1\2', cleaned)
+        if new == cleaned:
+            break
+        cleaned = new
+
+    # Ищем числа (целые и с разделителями)
+    amounts = re.findall(r'\d[\d,\.]*\d|\d{4,}', cleaned)
     results = []
     for a in amounts:
-        a_clean = a.replace(' ', '').replace(',', '').replace('.', '')
+        # Убираем запятые/точки-разделители тысяч (после них ровно 3 цифры)
+        a_clean = re.sub(r'[,\.](?=\d{3}(?:[,\.]|$))', '', a)
+        # Оставшуюся запятую меняем на точку (дробная часть)
+        a_clean = a_clean.replace(',', '.').replace(' ', '')
         try:
             val = float(a_clean)
-            if val > 100:
+            if val >= 100:
                 results.append(val)
         except:
             pass
+
     return max(results) if results else None
 
 
@@ -946,9 +959,10 @@ def ask_ai(question: str) -> str:
             logger.error(f"get_main_cash_summary error: {e}")
             return f"❌ Ошибка при расчёте основной кассы: {e}"
 
-    # Быстрый путь: поиск дня по остатку счёта (ИСПРАВЛЕНО)
+    # Быстрый путь: поиск дня по остатку счёта
     if _is_balance_search_question(question):
         target = _extract_amount_from_question(question)
+        logger.info(f"Balance search: text='{question}' -> target={target}")
         if target is not None:
             try:
                 matches = find_date_by_balance(target, tolerance=1.0)
@@ -966,6 +980,8 @@ def ask_ai(question: str) -> str:
                 return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
             except Exception as e:
                 logger.error(f"find_date_by_balance error: {e}")
+        else:
+            logger.warning(f"_extract_amount_from_question вернул None для: '{question}'")
 
     today = datetime.now().strftime("%d.%m.%Y")
 
@@ -1046,6 +1062,23 @@ def ask_ai(question: str) -> str:
             }
         },
         {
+            "name": "find_date_by_balance_tool",
+            "description": (
+                "Ищет дату когда остаток на счёте был равен указанной сумме. "
+                "Используй когда спрашивают: 'какого дня остаток X', 'когда был остаток X тг', "
+                "'какого числа на счёте было X'. "
+                "Перебирает все счета и все даты автоматически."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "description": "Искомый остаток в тенге"},
+                    "tolerance": {"type": "number", "description": "Допуск ±тг (по умолчанию 1.0)", "default": 1.0}
+                },
+                "required": ["amount"]
+            }
+        },
+        {
             "name": "web_search",
             "description": "Поиск в интернете. Используй для погоды, курсов валют, новостей.",
             "input_schema": {
@@ -1074,6 +1107,8 @@ def ask_ai(question: str) -> str:
         "9. Если спрашивают 'основная касса', 'сколько денег', 'все счета', "
         "   'на всех счетах' — используй get_main_cash.\n"
         "10. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
+        "11. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
+        "    используй find_date_by_balance_tool.\n"
     )
 
     messages = [{"role": "user", "content": question}]
@@ -1181,6 +1216,25 @@ def ask_ai(question: str) -> str:
                             result_content = "\n".join(lines)
                         else:
                             result_content = f"Операций с суммой {amount:,.0f} тг не найдено."
+
+                elif tool_name == "find_date_by_balance_tool":
+                    amount = float(tool_input.get("amount", 0))
+                    tolerance = float(tool_input.get("tolerance", 1.0))
+                    matches = find_date_by_balance(amount, tolerance=tolerance)
+                    if matches:
+                        lines = [f"Остаток {amount:,.0f} тг найден:"]
+                        for acc, date_str, bal in matches:
+                            lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                        result_content = "\n".join(lines)
+                    else:
+                        matches2 = find_date_by_balance(amount, tolerance=500.0)
+                        if matches2:
+                            lines = [f"Точного совпадения нет. Ближайшие к {amount:,.0f} тг:"]
+                            for acc, date_str, bal in matches2[:5]:
+                                lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                            result_content = "\n".join(lines)
+                        else:
+                            result_content = f"Остаток {amount:,.0f} тг не найден ни на одном счёте."
 
                 elif tool_name == "web_search":
                     result_content = _do_web_search(tool_input.get("query", ""))
