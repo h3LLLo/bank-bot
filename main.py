@@ -44,7 +44,6 @@ IBAN_MAP = {
     "KZ31722RD00029080091": "Депозит Каспи кз",
 }
 
-# Счета, входящие в "основную кассу"
 MAIN_CASH_ACCOUNTS = [
     "Каспи Имангазиева Зухра",
     "Каспи СЕРИК",
@@ -60,7 +59,7 @@ MAIN_CASH_ACCOUNTS = [
     "БЦК Доллары ТОО",
     "Народный банк Ип Серик",
     "БЦК Ип Серик",
-    "Касса",  # наличные / сейф
+    "Касса",
 ]
 
 
@@ -551,10 +550,6 @@ def get_account_balance(account_name: str):
 
 
 def get_account_balance_on_date(account_name: str, target_date_str: str):
-    """
-    Считает остаток по счёту на конкретную дату.
-    Суммирует начальный остаток из Справки + все операции ДО указанной даты включительно.
-    """
     target_date = None
     for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y", "%Y-%m-%d"):
         try:
@@ -610,14 +605,8 @@ def get_account_balance_on_date(account_name: str, target_date_str: str):
 
 
 def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
-    """
-    Ищет по всем счетам и всем датам операций:
-    на какую дату остаток по счёту совпадает с target_amount (с допуском ±tolerance).
-    Возвращает список совпадений: [(счёт, дата, остаток), ...]
-    """
     spreadsheet = get_spreadsheet()
 
-    # Загружаем начальные остатки
     initial_balances = {}
     try:
         справка = spreadsheet.worksheet("Счета2026(Справка)")
@@ -633,9 +622,8 @@ def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
     реестр = spreadsheet.worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
 
-    # Группируем операции по счёту и собираем все уникальные даты
     from collections import defaultdict
-    ops_by_account = defaultdict(list)  # account -> [(date, amount)]
+    ops_by_account = defaultdict(list)
 
     for row in реестр_data[1:]:
         acc_val = str(row[6]).strip() if len(row) > 6 else ""
@@ -659,7 +647,6 @@ def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
     matches = []
 
     for account, ops in ops_by_account.items():
-        # Начальный остаток
         initial = 0.0
         for name, bal in initial_balances.items():
             if name.lower() == account.lower():
@@ -671,13 +658,9 @@ def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
                     initial = bal
                     break
 
-        # Сортируем операции по дате
         ops_sorted = sorted(ops, key=lambda x: x[0])
-
-        # Получаем все уникальные даты
         unique_dates = sorted(set(d for d, _ in ops_sorted))
 
-        # Для каждой даты считаем остаток (сумма всех операций до этой даты включительно)
         for check_date in unique_dates:
             total = initial + sum(amt for dt, amt in ops_sorted if dt <= check_date)
             balance = round(total, 2)
@@ -687,12 +670,43 @@ def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
     return matches
 
 
+def find_operation_by_amount(target_amount: float, tolerance: float = 1.0):
+    spreadsheet = get_spreadsheet()
+    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    matches = []
+    for row in реестр_data[1:]:
+        acc_val  = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val  = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        desc_val = str(row[8]).strip() if len(row) > 8 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        parsed = parse_amount_from_registry(amt_val)
+        if parsed is None:
+            continue
+        if abs(abs(parsed) - abs(target_amount)) <= tolerance:
+            row_date = None
+            for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+                try:
+                    row_date = datetime.strptime(date_val, fmt)
+                    break
+                except:
+                    pass
+            date_display = row_date.strftime("%d.%m.%Y") if row_date else date_val
+            matches.append((acc_val, date_display, parsed, desc_val[:60]))
+
+    def sort_key(m):
+        try:
+            return datetime.strptime(m[1], "%d.%m.%Y")
+        except:
+            return datetime.min
+    matches.sort(key=sort_key)
+    return matches
+
 
 def get_main_cash_summary():
-    """
-    Считает суммарный остаток по всем счетам основной кассы
-    (начальный остаток из Справки + операции из реестра).
-    """
     spreadsheet = get_spreadsheet()
 
     initial_balances = {}
@@ -978,7 +992,6 @@ MAIN_CASH_KEYWORDS = [
     "общий баланс", "суммарный остаток", "суммарный баланс",
 ]
 
-
 BALANCE_SEARCH_KEYWORDS = [
     "какого дня", "какой день", "какого числа", "в какой день", "когда был остаток",
     "когда был баланс", "когда была сумма", "когда стало", "дата остатка",
@@ -988,23 +1001,19 @@ BALANCE_SEARCH_KEYWORDS = [
 
 
 def _extract_amount_from_question(text: str):
-    """Извлекает числовую сумму из вопроса."""
-    # Убираем пробелы внутри числа: 685 486 -> 685486
     cleaned = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
-    # Ищем числа (с возможными разделителями)
     amounts = re.findall(r'\d[\d\s,\.]*\d|\d+', cleaned)
     results = []
     for a in amounts:
         a_clean = a.replace(' ', '').replace(',', '').replace('.', '')
         try:
             val = float(a_clean)
-            if val > 100:  # игнорируем маленькие числа (год, день и т.п.)
+            if val > 100:
                 results.append(val)
         except:
             pass
     if not results:
         return None
-    # Берём наибольшее число — скорее всего это сумма
     return max(results)
 
 
@@ -1028,7 +1037,7 @@ def ask_ai(question: str) -> str:
     if not ANTHROPIC_API_KEY:
         return "❌ ANTHROPIC_API_KEY не задан. Добавьте его в переменные окружения на Render."
 
-    # Быстрый путь: если вопрос явно про основную кассу — сразу вызываем функцию
+    # Быстрый путь: если вопрос явно про основную кассу
     if _is_main_cash_question(question):
         try:
             summary_text, total = get_main_cash_summary()
@@ -1037,7 +1046,7 @@ def ask_ai(question: str) -> str:
             logger.error(f"get_main_cash_summary error: {e}")
             return f"❌ Ошибка при расчёте основной кассы: {e}"
 
-    # Быстрый путь: поиск даты по остатку
+    # Быстрый путь: поиск ДАТЫ по остатку счёта (ИСПРАВЛЕНО)
     if _is_balance_search_question(question):
         target = _extract_amount_from_question(question)
         if target is not None:
@@ -1048,15 +1057,14 @@ def ask_ai(question: str) -> str:
                     for acc, date_str, bal in matches:
                         lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
                     return "\n".join(lines)
-                else:
-                    # Попробуем с большим допуском
-                    matches2 = find_date_by_balance(target, tolerance=500.0)
-                    if matches2:
-                        lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
-                        for acc, date_str, bal in matches2[:5]:
-                            lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
-                        return "\n".join(lines)
-                    return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
+                # Пробуем с допуском ±500
+                matches2 = find_date_by_balance(target, tolerance=500.0)
+                if matches2:
+                    lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
+                    for acc, date_str, bal in matches2[:5]:
+                        lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                    return "\n".join(lines)
+                return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
             except Exception as e:
                 logger.error(f"find_date_by_balance error: {e}")
 
@@ -1146,7 +1154,7 @@ def ask_ai(question: str) -> str:
             "description": (
                 "Ищет по ВСЕМ счетам и ВСЕМ датам: когда остаток равнялся указанной сумме. "
                 "Используй когда спрашивают: 'какого числа был остаток X', 'когда был остаток X', "
-                "'этот остаток X когда', 'найди дату остатка X'. "
+                "'этот остаток X когда', 'найди дату остатка X', 'в какой день был остаток X'. "
                 "НЕ спрашивай уточнений — сразу ищи по всем счетам."
             ),
             "input_schema": {
@@ -1201,7 +1209,7 @@ def ask_ai(question: str) -> str:
         "8. Касса/Сейф — это наличные деньги компании, её остаток может быть отрицательным "
         "   (если компания ведёт учёт авансов или долгов). Это нормально — не сообщай об ошибке.\n"
         "9. Если спрашивают 'когда был остаток X', 'какого числа был остаток X', "
-        "   'этот остаток X когда', 'найди дату остатка X' — "
+        "   'этот остаток X когда', 'найди дату остатка X', 'в какой день был остаток X' — "
         "   ОБЯЗАТЕЛЬНО используй find_balance_date с суммой из вопроса. "
         "   НЕ спрашивай уточнений про счёт или период — ищи сразу по всем счетам. "
         "   Если дата И счёт указаны явно — тогда используй get_balance_on_date.\n"
@@ -1310,7 +1318,6 @@ def ask_ai(question: str) -> str:
                             lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
                         result_content = "\n".join(lines)
                     else:
-                        # Пробуем с допуском 500
                         matches2 = find_date_by_balance(amount, tolerance=500.0)
                         if matches2:
                             lines = [f"Точного совпадения нет. Ближайшие к {amount:,.0f} тг:"]
