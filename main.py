@@ -521,7 +521,6 @@ def _matches_account(row_acc, target):
 
 
 def _load_initial_balances():
-    """Загружает начальные остатки из листа Справка."""
     try:
         справка = get_spreadsheet().worksheet("Счета2026(Справка)")
         справка_data = справка.get_all_values()
@@ -538,7 +537,6 @@ def _load_initial_balances():
 
 
 def _get_initial_for_account(account_name, initial_balances):
-    """Находит начальный остаток для счёта (точное, потом нечёткое совпадение)."""
     for name, bal in initial_balances.items():
         if name.lower() == account_name.lower():
             return bal
@@ -556,7 +554,6 @@ def get_account_balance(account_name: str):
     spreadsheet = get_spreadsheet()
     initial_balances = _load_initial_balances()
     initial = _get_initial_for_account(account_name, initial_balances)
-
     реестр = spreadsheet.worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
     ops_total = 0.0
@@ -576,7 +573,6 @@ def get_account_balance(account_name: str):
 
 
 def get_account_balance_on_date(account_name: str, target_date_str: str):
-    """Остаток по счёту на конкретную дату."""
     target_date = None
     for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y", "%Y-%m-%d"):
         try:
@@ -586,10 +582,8 @@ def get_account_balance_on_date(account_name: str, target_date_str: str):
             pass
     if not target_date:
         return None, None, None, f"Не удалось распознать дату: {target_date_str}"
-
     initial_balances = _load_initial_balances()
     initial = _get_initial_for_account(account_name, initial_balances)
-
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
     ops_total = 0.0
@@ -618,10 +612,6 @@ def get_account_balance_on_date(account_name: str, target_date_str: str):
 
 
 def find_operation_by_amount(target_amount: float, tolerance: float = 1.0):
-    """
-    Ищет строки реестра где |сумма операции| совпадает с target_amount (±tolerance).
-    Возвращает список: [(счёт, дата_дд.мм.гггг, сумма, описание), ...]
-    """
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
     matches = []
@@ -656,10 +646,6 @@ def find_operation_by_amount(target_amount: float, tolerance: float = 1.0):
 
 
 def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
-    """
-    Перебирает все счета и все даты операций,
-    ищет когда накопленный остаток (нач. остаток + операции) совпадал с target_amount.
-    """
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -698,7 +684,6 @@ def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
 
 
 def get_main_cash_summary():
-    """Считает остатки по всем счетам основной кассы."""
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -932,7 +917,6 @@ def _is_balance_search_question(text: str) -> bool:
 
 
 def _extract_amount_from_question(text: str):
-    """Извлекает числовую сумму из вопроса (берёт наибольшее число > 100)."""
     cleaned = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
     amounts = re.findall(r'\d[\d\s,\.]*\d|\d+', cleaned)
     results = []
@@ -962,26 +946,26 @@ def ask_ai(question: str) -> str:
             logger.error(f"get_main_cash_summary error: {e}")
             return f"❌ Ошибка при расчёте основной кассы: {e}"
 
-# Быстрый путь: поиск дня по остатку счёта
-if _is_balance_search_question(question):
-    target = _extract_amount_from_question(question)
-    if target is not None:
-        try:
-            matches = find_date_by_balance(target, tolerance=1.0)
-            if matches:
-                lines = [f"Остаток {target:,.0f} тг найден:"]
-                for acc, date_str, bal in matches:
-                    lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
-                return "\n".join(lines)
-            matches2 = find_date_by_balance(target, tolerance=500.0)
-            if matches2:
-                lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
-                for acc, date_str, bal in matches2[:5]:
-                    lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
-                return "\n".join(lines)
-            return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
-        except Exception as e:
-            logger.error(f"find_date_by_balance error: {e}")
+    # Быстрый путь: поиск дня по остатку счёта (ИСПРАВЛЕНО)
+    if _is_balance_search_question(question):
+        target = _extract_amount_from_question(question)
+        if target is not None:
+            try:
+                matches = find_date_by_balance(target, tolerance=1.0)
+                if matches:
+                    lines = [f"Остаток {target:,.0f} тг найден:"]
+                    for acc, date_str, bal in matches:
+                        lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                    return "\n".join(lines)
+                matches2 = find_date_by_balance(target, tolerance=500.0)
+                if matches2:
+                    lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
+                    for acc, date_str, bal in matches2[:5]:
+                        lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                    return "\n".join(lines)
+                return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
+            except Exception as e:
+                logger.error(f"find_date_by_balance error: {e}")
 
     today = datetime.now().strftime("%d.%m.%Y")
 
@@ -1063,9 +1047,7 @@ if _is_balance_search_question(question):
         },
         {
             "name": "web_search",
-            "description": (
-                "Поиск в интернете. Используй для погоды, курсов валют, новостей."
-            ),
+            "description": "Поиск в интернете. Используй для погоды, курсов валют, новостей.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1515,11 +1497,11 @@ def process_halyk_pdf(file_bytes):
     if m_iban:
         account = IBAN_MAP.get(m_iban.group(1).strip(), account)
 
-    m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
+    m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\д\s,]+\.\d{2})", full_text)
     if m_open:
         opening_balance = parse_kz_num(m_open.group(1))
 
-    m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
+    m_bal = re.search(r"[Ии]сходящий остаток[:\s]*([\д\s,]+\.\d{2})", full_text)
     if m_bal:
         closing_balance = parse_kz_num(m_bal.group(1))
 
@@ -1690,7 +1672,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "💬 Вопросы:\n"
                 "• Сколько пришло за май по счёту Каспи?\n"
                 "• Основная касса — сколько денег?\n"
-                "• Какого дня была операция на 685486 тг?\n"
+                "• Какого дня был остаток 685486 тг?\n"
                 "• Какой курс доллара?\n\n"
                 "🔍 Команды:\n"
                 "/rows <счёт> — строки по счёту\n"
@@ -1875,4 +1857,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
