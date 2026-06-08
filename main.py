@@ -1,6 +1,4 @@
-bash
 
-cat > /mnt/user-data/outputs/main.py << 'ENDOFFILE'
 import os
 import re
 import json
@@ -1883,8 +1881,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-ENDOFFILE
-echo "Done"
-Output
 
-Done
