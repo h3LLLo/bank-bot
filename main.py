@@ -962,32 +962,26 @@ def ask_ai(question: str) -> str:
             logger.error(f"get_main_cash_summary error: {e}")
             return f"❌ Ошибка при расчёте основной кассы: {e}"
 
-    # Быстрый путь: поиск дня по сумме операции
-    if _is_balance_search_question(question):
-        target = _extract_amount_from_question(question)
-        if target is not None:
-            try:
-                # Сначала ищем точную операцию с такой суммой
-                op_matches = find_operation_by_amount(target, tolerance=1.0)
-                if op_matches:
-                    lines = [f"Найдено операций с суммой {target:,.0f} тг: {len(op_matches)}"]
-                    for acc, date_str, amt, desc in op_matches[:10]:
-                        sign = "+" if amt > 0 else ""
-                        lines.append(f"  {date_str} | {acc} | {sign}{amt:,.0f} тг | {desc}")
-                    if len(op_matches) > 10:
-                        lines.append(f"  ... и ещё {len(op_matches) - 10} совпадений")
-                    return "\n".join(lines)
-                # Если точного нет — ищем с допуском ±100
-                op_matches2 = find_operation_by_amount(target, tolerance=100.0)
-                if op_matches2:
-                    lines = [f"Точного совпадения нет. Близкие к {target:,.0f} тг:"]
-                    for acc, date_str, amt, desc in op_matches2[:5]:
-                        sign = "+" if amt > 0 else ""
-                        lines.append(f"  {date_str} | {acc} | {sign}{amt:,.0f} тг | {desc}")
-                    return "\n".join(lines)
-                return f"Операций с суммой {target:,.0f} тг не найдено."
-            except Exception as e:
-                logger.error(f"find_operation_by_amount error: {e}")
+# Быстрый путь: поиск дня по остатку счёта
+if _is_balance_search_question(question):
+    target = _extract_amount_from_question(question)
+    if target is not None:
+        try:
+            matches = find_date_by_balance(target, tolerance=1.0)
+            if matches:
+                lines = [f"Остаток {target:,.0f} тг найден:"]
+                for acc, date_str, bal in matches:
+                    lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                return "\n".join(lines)
+            matches2 = find_date_by_balance(target, tolerance=500.0)
+            if matches2:
+                lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
+                for acc, date_str, bal in matches2[:5]:
+                    lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                return "\n".join(lines)
+            return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
+        except Exception as e:
+            logger.error(f"find_date_by_balance error: {e}")
 
     today = datetime.now().strftime("%d.%m.%Y")
 
