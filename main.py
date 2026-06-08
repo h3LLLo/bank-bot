@@ -609,6 +609,85 @@ def get_account_balance_on_date(account_name: str, target_date_str: str):
     return initial, round(ops_total, 2), balance, ops_count
 
 
+def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
+    """
+    Ищет по всем счетам и всем датам операций:
+    на какую дату остаток по счёту совпадает с target_amount (с допуском ±tolerance).
+    Возвращает список совпадений: [(счёт, дата, остаток), ...]
+    """
+    spreadsheet = get_spreadsheet()
+
+    # Загружаем начальные остатки
+    initial_balances = {}
+    try:
+        справка = spreadsheet.worksheet("Счета2026(Справка)")
+        справка_data = справка.get_all_values()
+        for row in справка_data:
+            if row and row[0].strip() and len(row) > 1:
+                bal = parse_справка_num(row[1])
+                if bal is not None:
+                    initial_balances[row[0].strip()] = bal
+    except Exception as e:
+        logger.warning(f"find_date_by_balance: справка error: {e}")
+
+    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    # Группируем операции по счёту и собираем все уникальные даты
+    from collections import defaultdict
+    ops_by_account = defaultdict(list)  # account -> [(date, amount)]
+
+    for row in реестр_data[1:]:
+        acc_val = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        row_date = None
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                row_date = datetime.strptime(date_val, fmt)
+                break
+            except:
+                pass
+        if not row_date:
+            continue
+        parsed = parse_amount_from_registry(amt_val)
+        if parsed is not None:
+            ops_by_account[acc_val].append((row_date, parsed))
+
+    matches = []
+
+    for account, ops in ops_by_account.items():
+        # Начальный остаток
+        initial = 0.0
+        for name, bal in initial_balances.items():
+            if name.lower() == account.lower():
+                initial = bal
+                break
+        if initial == 0.0:
+            for name, bal in initial_balances.items():
+                if _account_similarity(account, name) >= 0.35:
+                    initial = bal
+                    break
+
+        # Сортируем операции по дате
+        ops_sorted = sorted(ops, key=lambda x: x[0])
+
+        # Получаем все уникальные даты
+        unique_dates = sorted(set(d for d, _ in ops_sorted))
+
+        # Для каждой даты считаем остаток (сумма всех операций до этой даты включительно)
+        for check_date in unique_dates:
+            total = initial + sum(amt for dt, amt in ops_sorted if dt <= check_date)
+            balance = round(total, 2)
+            if abs(balance - target_amount) <= tolerance:
+                matches.append((account, check_date.strftime("%d.%m.%Y"), balance))
+
+    return matches
+
+
+
 def get_main_cash_summary():
     """
     Считает суммарный остаток по всем счетам основной кассы
@@ -900,6 +979,43 @@ MAIN_CASH_KEYWORDS = [
 ]
 
 
+BALANCE_SEARCH_KEYWORDS = [
+    "какого дня", "какой день", "какого числа", "в какой день", "когда был остаток",
+    "когда был баланс", "когда была сумма", "когда стало", "дата остатка",
+    "найди дату", "какая дата", "какого числа был", "когда на счете было",
+    "когда на счёте было", "этот остаток", "этот баланс", "такой остаток",
+]
+
+
+def _extract_amount_from_question(text: str):
+    """Извлекает числовую сумму из вопроса."""
+    # Убираем пробелы внутри числа: 685 486 -> 685486
+    cleaned = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
+    # Ищем числа (с возможными разделителями)
+    amounts = re.findall(r'\d[\d\s,\.]*\d|\d+', cleaned)
+    results = []
+    for a in amounts:
+        a_clean = a.replace(' ', '').replace(',', '').replace('.', '')
+        try:
+            val = float(a_clean)
+            if val > 100:  # игнорируем маленькие числа (год, день и т.п.)
+                results.append(val)
+        except:
+            pass
+    if not results:
+        return None
+    # Берём наибольшее число — скорее всего это сумма
+    return max(results)
+
+
+def _is_balance_search_question(text: str) -> bool:
+    t = text.lower().strip()
+    for kw in BALANCE_SEARCH_KEYWORDS:
+        if kw in t:
+            return True
+    return False
+
+
 def _is_main_cash_question(text: str) -> bool:
     t = text.lower().strip()
     for kw in MAIN_CASH_KEYWORDS:
@@ -920,6 +1036,29 @@ def ask_ai(question: str) -> str:
         except Exception as e:
             logger.error(f"get_main_cash_summary error: {e}")
             return f"❌ Ошибка при расчёте основной кассы: {e}"
+
+    # Быстрый путь: поиск даты по остатку
+    if _is_balance_search_question(question):
+        target = _extract_amount_from_question(question)
+        if target is not None:
+            try:
+                matches = find_date_by_balance(target, tolerance=1.0)
+                if matches:
+                    lines = [f"Остаток {target:,.0f} тг найден:"]
+                    for acc, date_str, bal in matches:
+                        lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                    return "\n".join(lines)
+                else:
+                    # Попробуем с большим допуском
+                    matches2 = find_date_by_balance(target, tolerance=500.0)
+                    if matches2:
+                        lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
+                        for acc, date_str, bal in matches2[:5]:
+                            lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                        return "\n".join(lines)
+                    return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
+            except Exception as e:
+                logger.error(f"find_date_by_balance error: {e}")
 
     today = datetime.now().strftime("%d.%m.%Y")
 
@@ -1003,6 +1142,30 @@ def ask_ai(question: str) -> str:
             }
         },
         {
+            "name": "find_balance_date",
+            "description": (
+                "Ищет по ВСЕМ счетам и ВСЕМ датам: когда остаток равнялся указанной сумме. "
+                "Используй когда спрашивают: 'какого числа был остаток X', 'когда был остаток X', "
+                "'этот остаток X когда', 'найди дату остатка X'. "
+                "НЕ спрашивай уточнений — сразу ищи по всем счетам."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "amount": {
+                        "type": "number",
+                        "description": "Сумма остатка для поиска (число)"
+                    },
+                    "tolerance": {
+                        "type": "number",
+                        "description": "Допуск поиска в тенге (по умолчанию 1.0)",
+                        "default": 1.0
+                    }
+                },
+                "required": ["amount"]
+            }
+        },
+        {
             "name": "web_search",
             "description": (
                 "Поиск актуальной информации в интернете. "
@@ -1037,9 +1200,11 @@ def ask_ai(question: str) -> str:
         "   Пиши обычным текстом, используй только цифры, буквы и знаки препинания.\n"
         "8. Касса/Сейф — это наличные деньги компании, её остаток может быть отрицательным "
         "   (если компания ведёт учёт авансов или долгов). Это нормально — не сообщай об ошибке.\n"
-        "9. Если спрашивают 'когда был остаток X' или 'какого числа остаток X' — "
-        "   используй get_balance_on_date. Если дата не указана, попроси уточнить дату и счёт. "
-        "   Никогда не показывай текущий остаток вместо остатка на конкретную дату.\n"
+        "9. Если спрашивают 'когда был остаток X', 'какого числа был остаток X', "
+        "   'этот остаток X когда', 'найди дату остатка X' — "
+        "   ОБЯЗАТЕЛЬНО используй find_balance_date с суммой из вопроса. "
+        "   НЕ спрашивай уточнений про счёт или период — ищи сразу по всем счетам. "
+        "   Если дата И счёт указаны явно — тогда используй get_balance_on_date.\n"
         "10. КРИТИЧЕСКИ ВАЖНО: если спрашивают 'основная касса', 'сколько денег', "
         "    'сколько у нас денег', 'деньги на всех счетах', 'по всем счетам', "
         "    'итого по кассе', 'общий остаток', 'все счета', 'суммарный баланс' — "
@@ -1134,6 +1299,26 @@ def ask_ai(question: str) -> str:
                 elif tool_name == "get_main_cash":
                     summary_text, total = get_main_cash_summary()
                     result_content = summary_text
+
+                elif tool_name == "find_balance_date":
+                    amount = float(tool_input.get("amount", 0))
+                    tolerance = float(tool_input.get("tolerance", 1.0))
+                    matches = find_date_by_balance(amount, tolerance=tolerance)
+                    if matches:
+                        lines = [f"Остаток {amount:,.0f} тг найден:"]
+                        for acc, date_str, bal in matches:
+                            lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                        result_content = "\n".join(lines)
+                    else:
+                        # Пробуем с допуском 500
+                        matches2 = find_date_by_balance(amount, tolerance=500.0)
+                        if matches2:
+                            lines = [f"Точного совпадения нет. Ближайшие к {amount:,.0f} тг:"]
+                            for acc, date_str, bal in matches2[:5]:
+                                lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                            result_content = "\n".join(lines)
+                        else:
+                            result_content = f"Остаток {amount:,.0f} тг не найден ни на одном счёте."
 
                 elif tool_name == "web_search":
                     query = tool_input.get("query", "")
