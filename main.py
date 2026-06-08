@@ -1,9 +1,13 @@
+bash
+
+cat > /mnt/user-data/outputs/main.py << 'ENDOFFILE'
 import os
 import re
 import json
 import logging
 import time
 import requests
+from collections import defaultdict
 from io import BytesIO
 from datetime import datetime
 
@@ -21,9 +25,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME", "Реестр26")
 SPREADSHEET_URL = f"https://docs.google.com/spreadsheets/d/{os.getenv('SPREADSHEET_ID')}"
-
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-
 WEBHOOK_URL = "https://bank-bot-5f5g.onrender.com"
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -62,6 +64,7 @@ MAIN_CASH_ACCOUNTS = [
     "Касса",
 ]
 
+# ============ GOOGLE SHEETS ============
 
 def get_spreadsheet():
     creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
@@ -77,6 +80,8 @@ def get_spreadsheet():
 def get_sheet():
     return get_spreadsheet().worksheet(SHEET_NAME)
 
+
+# ============ УТИЛИТЫ ============
 
 def format_date(val):
     if isinstance(val, datetime):
@@ -125,7 +130,8 @@ def get_month_nachislenia(desc, date_str):
                 except:
                     pass
         months = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "май": 5, "мая": 5,
-                  "июн": 6, "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12}
+                  "июн": 6, "июл": 7, "август": 8, "сентябр": 9, "октябр": 10,
+                  "ноябр": 11, "декабр": 12}
         for w, n in months.items():
             if w in str(desc).lower():
                 return n
@@ -148,8 +154,10 @@ def get_article(desc, amount):
     d = str(desc)
     for kw in ["Оплата за услуги операций по картам Kaspi Gold",
                "Оплата рекламных услуг", "Оплата за услуги процессинга Без НДС",
-               "Оплата услуги по обработке данных", "Оплата за информационно-технологические услуги",
-               "Бонусы за отзыв клиенту", "Оплата услуг по обработке данных, связанных с доставкой",
+               "Оплата услуги по обработке данных",
+               "Оплата за информационно-технологические услуги",
+               "Бонусы за отзыв клиенту",
+               "Оплата услуг по обработке данных, связанных с доставкой",
                "Погашение комиссии за ведение счета",
                "Бонусы клиенту от продаж за"]:
         if kw.lower() in d.lower():
@@ -485,9 +493,9 @@ def find_account_in_справка(account_name: str, справка_data: list)
             best_name = candidate
             best_balance = parse_справка_num(row[1] if len(row) > 1 else "")
     if best_score >= 0.35 and best_balance is not None:
-        logger.info(f"find_account_in_справка: '{account_name}' -> '{best_name}' (score={best_score:.2f}, balance={best_balance})")
+        logger.info(f"find_account_in_справка: '{account_name}' -> '{best_name}' score={best_score:.2f}")
         return best_name, best_balance
-    logger.warning(f"find_account_in_справка: счёт '{account_name}' не найден в справке (best_score={best_score:.2f})")
+    logger.warning(f"find_account_in_справка: '{account_name}' не найден (best={best_score:.2f})")
     return None, None
 
 
@@ -497,14 +505,11 @@ def _clean_name_for_match(s):
     s = s.replace("\xa0", " ").replace("\u200b", "").replace("\n", " ").replace("\r", " ")
     s = unicodedata.normalize("NFKC", s)
     s = s.strip("'\"")
-    words = s.split()
-    return " ".join(words).lower()
+    return " ".join(s.split()).lower()
 
 
 def _matches_account_strict(row_acc, target):
-    r = _clean_name_for_match(row_acc)
-    t = _clean_name_for_match(target)
-    return r == t
+    return _clean_name_for_match(row_acc) == _clean_name_for_match(target)
 
 
 def _matches_account(row_acc, target):
@@ -517,18 +522,42 @@ def _matches_account(row_acc, target):
     return False
 
 
+def _load_initial_balances():
+    """Загружает начальные остатки из листа Справка."""
+    try:
+        справка = get_spreadsheet().worksheet("Счета2026(Справка)")
+        справка_data = справка.get_all_values()
+        result = {}
+        for row in справка_data:
+            if row and row[0].strip() and len(row) > 1:
+                bal = parse_справка_num(row[1])
+                if bal is not None:
+                    result[row[0].strip()] = bal
+        return result
+    except Exception as e:
+        logger.warning(f"_load_initial_balances error: {e}")
+        return {}
+
+
+def _get_initial_for_account(account_name, initial_balances):
+    """Находит начальный остаток для счёта (точное, потом нечёткое совпадение)."""
+    for name, bal in initial_balances.items():
+        if name.lower() == account_name.lower():
+            return bal
+    best_score = 0.0
+    best_bal = 0.0
+    for name, bal in initial_balances.items():
+        score = _account_similarity(account_name, name)
+        if score > best_score and score >= 0.35:
+            best_score = score
+            best_bal = bal
+    return best_bal
+
+
 def get_account_balance(account_name: str):
     spreadsheet = get_spreadsheet()
-    initial = 0.0
-    try:
-        справка = spreadsheet.worksheet("Счета2026(Справка)")
-        справка_data = справка.get_all_values()
-        _, bal = find_account_in_справка(account_name, справка_data)
-        if bal is not None:
-            initial = bal
-            logger.info(f"get_account_balance: '{account_name}' начальный остаток = {initial}")
-    except Exception as e:
-        logger.warning(f"get_account_balance: справка error: {e}")
+    initial_balances = _load_initial_balances()
+    initial = _get_initial_for_account(account_name, initial_balances)
 
     реестр = spreadsheet.worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -544,12 +573,12 @@ def get_account_balance(account_name: str):
             if parsed is not None:
                 ops_total += parsed
                 ops_count += 1
-
     dds = round(initial + ops_total, 2)
     return initial, round(ops_total, 2), dds, ops_count
 
 
 def get_account_balance_on_date(account_name: str, target_date_str: str):
+    """Остаток по счёту на конкретную дату."""
     target_date = None
     for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y", "%Y-%m-%d"):
         try:
@@ -560,23 +589,13 @@ def get_account_balance_on_date(account_name: str, target_date_str: str):
     if not target_date:
         return None, None, None, f"Не удалось распознать дату: {target_date_str}"
 
-    spreadsheet = get_spreadsheet()
-    initial = 0.0
-    try:
-        справка = spreadsheet.worksheet("Счета2026(Справка)")
-        справка_data = справка.get_all_values()
-        _, bal = find_account_in_справка(account_name, справка_data)
-        if bal is not None:
-            initial = bal
-    except Exception as e:
-        logger.warning(f"get_account_balance_on_date: справка error: {e}")
+    initial_balances = _load_initial_balances()
+    initial = _get_initial_for_account(account_name, initial_balances)
 
-    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
-
     ops_total = 0.0
     ops_count = 0
-
     for row in реестр_data[1:]:
         acc_val = str(row[6]).strip() if len(row) > 6 else ""
         amt_val = str(row[4]).strip() if len(row) > 4 else ""
@@ -592,89 +611,21 @@ def get_account_balance_on_date(account_name: str, target_date_str: str):
                 break
             except:
                 pass
-        if not row_date:
-            continue
-        if row_date <= target_date:
+        if row_date and row_date <= target_date:
             parsed = parse_amount_from_registry(amt_val)
             if parsed is not None:
                 ops_total += parsed
                 ops_count += 1
-
-    balance = round(initial + ops_total, 2)
-    return initial, round(ops_total, 2), balance, ops_count
-
-
-def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
-    spreadsheet = get_spreadsheet()
-
-    initial_balances = {}
-    try:
-        справка = spreadsheet.worksheet("Счета2026(Справка)")
-        справка_data = справка.get_all_values()
-        for row in справка_data:
-            if row and row[0].strip() and len(row) > 1:
-                bal = parse_справка_num(row[1])
-                if bal is not None:
-                    initial_balances[row[0].strip()] = bal
-    except Exception as e:
-        logger.warning(f"find_date_by_balance: справка error: {e}")
-
-    реестр = spreadsheet.worksheet(SHEET_NAME)
-    реестр_data = реестр.get_all_values()
-
-    from collections import defaultdict
-    ops_by_account = defaultdict(list)
-
-    for row in реестр_data[1:]:
-        acc_val = str(row[6]).strip() if len(row) > 6 else ""
-        amt_val = str(row[4]).strip() if len(row) > 4 else ""
-        date_val = str(row[3]).strip() if len(row) > 3 else ""
-        if not acc_val or not amt_val or not date_val:
-            continue
-        row_date = None
-        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
-            try:
-                row_date = datetime.strptime(date_val, fmt)
-                break
-            except:
-                pass
-        if not row_date:
-            continue
-        parsed = parse_amount_from_registry(amt_val)
-        if parsed is not None:
-            ops_by_account[acc_val].append((row_date, parsed))
-
-    matches = []
-
-    for account, ops in ops_by_account.items():
-        initial = 0.0
-        for name, bal in initial_balances.items():
-            if name.lower() == account.lower():
-                initial = bal
-                break
-        if initial == 0.0:
-            for name, bal in initial_balances.items():
-                if _account_similarity(account, name) >= 0.35:
-                    initial = bal
-                    break
-
-        ops_sorted = sorted(ops, key=lambda x: x[0])
-        unique_dates = sorted(set(d for d, _ in ops_sorted))
-
-        for check_date in unique_dates:
-            total = initial + sum(amt for dt, amt in ops_sorted if dt <= check_date)
-            balance = round(total, 2)
-            if abs(balance - target_amount) <= tolerance:
-                matches.append((account, check_date.strftime("%d.%m.%Y"), balance))
-
-    return matches
+    return initial, round(ops_total, 2), round(initial + ops_total, 2), ops_count
 
 
 def find_operation_by_amount(target_amount: float, tolerance: float = 1.0):
-    spreadsheet = get_spreadsheet()
-    реестр = spreadsheet.worksheet(SHEET_NAME)
+    """
+    Ищет строки реестра где |сумма операции| совпадает с target_amount (±tolerance).
+    Возвращает список: [(счёт, дата_дд.мм.гггг, сумма, описание), ...]
+    """
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
-
     matches = []
     for row in реестр_data[1:]:
         acc_val  = str(row[6]).strip() if len(row) > 6 else ""
@@ -706,23 +657,52 @@ def find_operation_by_amount(target_amount: float, tolerance: float = 1.0):
     return matches
 
 
+def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
+    """
+    Перебирает все счета и все даты операций,
+    ищет когда накопленный остаток (нач. остаток + операции) совпадал с target_amount.
+    """
+    initial_balances = _load_initial_balances()
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    ops_by_account = defaultdict(list)
+    for row in реестр_data[1:]:
+        acc_val  = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val  = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        row_date = None
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                row_date = datetime.strptime(date_val, fmt)
+                break
+            except:
+                pass
+        if not row_date:
+            continue
+        parsed = parse_amount_from_registry(amt_val)
+        if parsed is not None:
+            ops_by_account[acc_val].append((row_date, parsed))
+
+    matches = []
+    for account, ops in ops_by_account.items():
+        initial = _get_initial_for_account(account, initial_balances)
+        ops_sorted = sorted(ops, key=lambda x: x[0])
+        unique_dates = sorted(set(d for d, _ in ops_sorted))
+        for check_date in unique_dates:
+            total = initial + sum(amt for dt, amt in ops_sorted if dt <= check_date)
+            balance = round(total, 2)
+            if abs(balance - target_amount) <= tolerance:
+                matches.append((account, check_date.strftime("%d.%m.%Y"), balance))
+    return matches
+
+
 def get_main_cash_summary():
-    spreadsheet = get_spreadsheet()
-
-    initial_balances = {}
-    try:
-        справка = spreadsheet.worksheet("Счета2026(Справка)")
-        справка_data = справка.get_all_values()
-        for row in справка_data:
-            if row and row[0].strip() and len(row) > 1:
-                bal = parse_справка_num(row[1])
-                if bal is not None:
-                    initial_balances[row[0].strip()] = bal
-                    logger.info(f"Справка: {row[0].strip()} = {bal}")
-    except Exception as e:
-        logger.warning(f"get_main_cash_summary: справка error: {e}")
-
-    реестр = spreadsheet.worksheet(SHEET_NAME)
+    """Считает остатки по всем счетам основной кассы."""
+    initial_balances = _load_initial_balances()
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
 
     ops_by_account = {acc: 0.0 for acc in MAIN_CASH_ACCOUNTS}
@@ -743,33 +723,15 @@ def get_main_cash_summary():
 
     lines = []
     total = 0.0
-
     for acc in MAIN_CASH_ACCOUNTS:
-        initial = 0.0
-        found = None
-        for name, bal in initial_balances.items():
-            if name.lower() == acc.lower():
-                initial = bal
-                found = name
-                break
-        if found is None:
-            best_score = 0.0
-            for name, bal in initial_balances.items():
-                score = _account_similarity(acc, name)
-                if score > best_score and score >= 0.35:
-                    best_score = score
-                    initial = bal
-                    found = name
-
+        initial = _get_initial_for_account(acc, initial_balances)
         ops = ops_by_account[acc]
         current = round(initial + ops, 2)
         total += current
-
         if ops != 0 or initial != 0:
             lines.append(
                 f"  {acc}: {current:,.0f} тг"
-                f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f},"
-                f" {count_by_account[acc]} оп.)"
+                f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
             )
 
     result = "ОСНОВНАЯ КАССА — остатки по счетам:\n"
@@ -807,8 +769,7 @@ def build_balance_msg(account, bank_closing_balance):
 
 
 def get_account_rows(account_name):
-    spreadsheet = get_spreadsheet()
-    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
     matched = []
     for i, row in enumerate(реестр_data[1:], start=2):
@@ -825,34 +786,18 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         spreadsheet = get_spreadsheet()
         реестр = spreadsheet.worksheet(SHEET_NAME)
         data = реестр.get_all_values()
-
-        initial_balances = {}
-        try:
-            справка = spreadsheet.worksheet("Счета2026(Справка)")
-            справка_data = справка.get_all_values()
-            for row in справка_data:
-                if row and row[0].strip() and len(row) > 1:
-                    name = row[0].strip()
-                    bal = parse_справка_num(row[1])
-                    if bal is not None:
-                        initial_balances[name] = bal
-                        logger.info(f"Справка: {name} = {bal}")
-        except Exception as e:
-            logger.warning(f"get_sheets_data_for_ai: справка error: {e}")
+        initial_balances = _load_initial_balances()
 
         if len(data) < 2:
             return "Данных в таблице пока нет.", []
 
         rows = data[1:]
-
         month_totals = {}
         account_totals = {}
         article_totals = {}
-
         filtered_month_totals = {}
         filtered_account_totals = {}
         filtered_article_totals = {}
-
         detail_rows = []
 
         month_names = {
@@ -860,7 +805,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             "5": "Май", "6": "Июнь", "7": "Июль", "8": "Август",
             "9": "Сентябрь", "10": "Октябрь", "11": "Ноябрь", "12": "Декабрь"
         }
-
         has_filter = bool(filter_month or filter_account)
 
         for row in rows:
@@ -874,20 +818,17 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
                 amount = parse_amount_from_registry(amount_str)
                 if amount is None:
                     continue
-
                 if month:
                     month_totals[month] = month_totals.get(month, 0) + amount
                 if account:
                     account_totals[account] = account_totals.get(account, 0) + amount
                 if article:
                     article_totals[article] = article_totals.get(article, 0) + amount
-
                 match = True
                 if filter_account and filter_account.lower() not in account.lower():
                     match = False
                 if filter_month and str(filter_month) != str(month):
                     match = False
-
                 if match:
                     if month:
                         filtered_month_totals[month] = filtered_month_totals.get(month, 0) + amount
@@ -895,7 +836,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
                         filtered_account_totals[account] = filtered_account_totals.get(account, 0) + amount
                     if article:
                         filtered_article_totals[article] = filtered_article_totals.get(article, 0) + amount
-
                     detail_rows.append({
                         "дата": date_str,
                         "месяц": month_names.get(month, month),
@@ -907,56 +847,38 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             except:
                 continue
 
-        use_month_totals = filtered_month_totals if has_filter else month_totals
+        use_month_totals   = filtered_month_totals   if has_filter else month_totals
         use_account_totals = filtered_account_totals if has_filter else account_totals
         use_article_totals = filtered_article_totals if has_filter else article_totals
 
         summary = f"Всего строк в реестре: {len(rows)}\n"
         if has_filter:
-            filter_desc_parts = []
+            parts = []
             if filter_month:
-                filter_desc_parts.append(f"месяц={month_names.get(str(filter_month), filter_month)}")
+                parts.append(f"месяц={month_names.get(str(filter_month), filter_month)}")
             if filter_account:
-                filter_desc_parts.append(f"счёт={filter_account}")
-            summary += f"Применён фильтр: {', '.join(filter_desc_parts)}\n"
+                parts.append(f"счёт={filter_account}")
+            summary += f"Применён фильтр: {', '.join(parts)}\n"
             summary += f"Строк по фильтру: {len(detail_rows)}\n"
         summary += "\n"
 
         summary += "ОБОРОТЫ ПО МЕСЯЦАМ:\n"
         if use_month_totals:
             for m in sorted(use_month_totals.keys(), key=lambda x: int(x) if x.isdigit() else 99):
-                name = month_names.get(m, f"Месяц {m}")
-                summary += f"  {name}: {use_month_totals[m]:,.0f} ₸\n"
+                summary += f"  {month_names.get(m, f'Месяц {m}')}: {use_month_totals[m]:,.0f} ₸\n"
         else:
             summary += "  (нет данных)\n"
 
         summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
         total_all = 0.0
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
-            initial = 0.0
-            found_name = None
-            for name, bal in initial_balances.items():
-                if name.lower() == acc.lower():
-                    initial = bal
-                    found_name = name
-                    break
-            if found_name is None:
-                best_score = 0.0
-                for name, bal in initial_balances.items():
-                    score = _account_similarity(acc, name)
-                    if score > best_score and score >= 0.35:
-                        best_score = score
-                        initial = bal
-                        found_name = name
-
+            initial = _get_initial_for_account(acc, initial_balances)
             current = initial + ops_total
             total_all += current
-
-            if found_name:
+            if initial != 0:
                 summary += f"  {acc}: {current:,.0f} ₸  (нач.: {initial:,.0f} + обороты: {ops_total:,.0f})\n"
             else:
                 summary += f"  {acc}: {current:,.0f} ₸  (нач. остаток не найден, обороты: {ops_total:,.0f})\n"
-
         summary += f"  ИТОГО НА ВСЕХ СЧЕТАХ: {total_all:,.0f} ₸\n"
 
         summary += "\nОБОРОТЫ ПО СЧЕТАМ"
@@ -974,14 +896,13 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             if art:
                 summary += f"  {art}: {total:,.0f} ₸\n"
 
-        detail_rows = detail_rows[:limit_rows]
-        return summary, detail_rows
+        return summary, detail_rows[:limit_rows]
 
     except Exception as e:
         return f"Ошибка получения данных: {e}", []
 
 
-# ============ CLAUDE AI ============
+# ============ ДЕТЕКТОР ВОПРОСОВ ============
 
 MAIN_CASH_KEYWORDS = [
     "основная касса", "основной кассе", "основную кассу", "основной кассы",
@@ -993,14 +914,27 @@ MAIN_CASH_KEYWORDS = [
 ]
 
 BALANCE_SEARCH_KEYWORDS = [
-    "какого дня", "какой день", "какого числа", "в какой день", "когда был остаток",
-    "когда был баланс", "когда была сумма", "когда стало", "дата остатка",
-    "найди дату", "какая дата", "какого числа был", "когда на счете было",
-    "когда на счёте было", "этот остаток", "этот баланс", "такой остаток",
+    "какого дня", "какой день", "какого числа", "в какой день",
+    "когда был остаток", "когда был баланс", "когда была сумма", "когда стало",
+    "дата остатка", "найди дату", "какая дата", "какого числа был",
+    "когда на счете было", "когда на счёте было",
+    "этот остаток", "этот баланс", "такой остаток",
+    "когда было столько", "когда была такая сумма",
 ]
 
 
+def _is_main_cash_question(text: str) -> bool:
+    t = text.lower().strip()
+    return any(kw in t for kw in MAIN_CASH_KEYWORDS)
+
+
+def _is_balance_search_question(text: str) -> bool:
+    t = text.lower().strip()
+    return any(kw in t for kw in BALANCE_SEARCH_KEYWORDS)
+
+
 def _extract_amount_from_question(text: str):
+    """Извлекает числовую сумму из вопроса (берёт наибольшее число > 100)."""
     cleaned = re.sub(r'(\d)\s+(\d)', r'\1\2', text)
     amounts = re.findall(r'\d[\d\s,\.]*\d|\d+', cleaned)
     results = []
@@ -1012,61 +946,50 @@ def _extract_amount_from_question(text: str):
                 results.append(val)
         except:
             pass
-    if not results:
-        return None
-    return max(results)
+    return max(results) if results else None
 
 
-def _is_balance_search_question(text: str) -> bool:
-    t = text.lower().strip()
-    for kw in BALANCE_SEARCH_KEYWORDS:
-        if kw in t:
-            return True
-    return False
-
-
-def _is_main_cash_question(text: str) -> bool:
-    t = text.lower().strip()
-    for kw in MAIN_CASH_KEYWORDS:
-        if kw in t:
-            return True
-    return False
-
+# ============ CLAUDE AI ============
 
 def ask_ai(question: str) -> str:
     if not ANTHROPIC_API_KEY:
-        return "❌ ANTHROPIC_API_KEY не задан. Добавьте его в переменные окружения на Render."
+        return "❌ ANTHROPIC_API_KEY не задан."
 
-    # Быстрый путь: если вопрос явно про основную кассу
+    # Быстрый путь: основная касса
     if _is_main_cash_question(question):
         try:
-            summary_text, total = get_main_cash_summary()
+            summary_text, _ = get_main_cash_summary()
             return summary_text
         except Exception as e:
             logger.error(f"get_main_cash_summary error: {e}")
             return f"❌ Ошибка при расчёте основной кассы: {e}"
 
-    # Быстрый путь: поиск ДАТЫ по остатку счёта (ИСПРАВЛЕНО)
+    # Быстрый путь: поиск дня по сумме операции
     if _is_balance_search_question(question):
         target = _extract_amount_from_question(question)
         if target is not None:
             try:
-                matches = find_date_by_balance(target, tolerance=1.0)
-                if matches:
-                    lines = [f"Остаток {target:,.0f} тг найден:"]
-                    for acc, date_str, bal in matches:
-                        lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                # Сначала ищем точную операцию с такой суммой
+                op_matches = find_operation_by_amount(target, tolerance=1.0)
+                if op_matches:
+                    lines = [f"Найдено операций с суммой {target:,.0f} тг: {len(op_matches)}"]
+                    for acc, date_str, amt, desc in op_matches[:10]:
+                        sign = "+" if amt > 0 else ""
+                        lines.append(f"  {date_str} | {acc} | {sign}{amt:,.0f} тг | {desc}")
+                    if len(op_matches) > 10:
+                        lines.append(f"  ... и ещё {len(op_matches) - 10} совпадений")
                     return "\n".join(lines)
-                # Пробуем с допуском ±500
-                matches2 = find_date_by_balance(target, tolerance=500.0)
-                if matches2:
-                    lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
-                    for acc, date_str, bal in matches2[:5]:
-                        lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                # Если точного нет — ищем с допуском ±100
+                op_matches2 = find_operation_by_amount(target, tolerance=100.0)
+                if op_matches2:
+                    lines = [f"Точного совпадения нет. Близкие к {target:,.0f} тг:"]
+                    for acc, date_str, amt, desc in op_matches2[:5]:
+                        sign = "+" if amt > 0 else ""
+                        lines.append(f"  {date_str} | {acc} | {sign}{amt:,.0f} тг | {desc}")
                     return "\n".join(lines)
-                return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
+                return f"Операций с суммой {target:,.0f} тг не найдено."
             except Exception as e:
-                logger.error(f"find_date_by_balance error: {e}")
+                logger.error(f"find_operation_by_amount error: {e}")
 
     today = datetime.now().strftime("%d.%m.%Y")
 
@@ -1078,26 +1001,20 @@ def ask_ai(question: str) -> str:
                 "Возвращает сводку (итоги по месяцам, счетам, статьям) и детальные строки. "
                 "Используй для вопросов о финансах, остатках, оборотах, расходах, доходах. "
                 "ВАЖНО: если вопрос касается конкретного месяца — обязательно передавай filter_month. "
-                "Если вопрос касается конкретного счёта — передавай filter_account. "
-                "Никогда не суммируй данные за разные месяцы если спрашивают про один месяц."
+                "Если вопрос касается конкретного счёта — передавай filter_account."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "filter_account": {
                         "type": "string",
-                        "description": (
-                            "Фильтр по названию счёта (например 'Каспи', 'БЦК', 'Народный', 'Касса'). "
-                            "Пусто = все счета."
-                        )
+                        "description": "Фильтр по названию счёта. Пусто = все счета."
                     },
                     "filter_month": {
                         "type": "string",
                         "description": (
-                            "Номер месяца цифрой от 1 до 12. "
-                            "Январь=1, Февраль=2, Март=3, Апрель=4, Май=5, Июнь=6, "
-                            "Июль=7, Август=8, Сентябрь=9, Октябрь=10, Ноябрь=11, Декабрь=12. "
-                            "Пусто = все месяцы. "
+                            "Номер месяца от 1 до 12. "
+                            "Январь=1 ... Декабрь=12. Пусто = все месяцы. "
                             "ОБЯЗАТЕЛЬНО указывай если в вопросе упомянут конкретный месяц!"
                         )
                     },
@@ -1114,21 +1031,13 @@ def ask_ai(question: str) -> str:
             "name": "get_balance_on_date",
             "description": (
                 "Вычисляет остаток по конкретному счёту на указанную дату. "
-                "Используй когда спрашивают: 'когда был остаток X', 'остаток на дату', "
-                "'какого числа остаток составлял X тенге'. "
-                "Суммирует начальный остаток + все операции ДО указанной даты включительно."
+                "Используй когда явно указан и счёт, и дата."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "account_name": {
-                        "type": "string",
-                        "description": "Название счёта, например 'Каспи ТОО', 'БЦК Ип Серик'"
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "Дата в формате DD.MM.YYYY, например '15.05.2025'"
-                    }
+                    "account_name": {"type": "string", "description": "Название счёта"},
+                    "date": {"type": "string", "description": "Дата в формате DD.MM.YYYY"}
                 },
                 "required": ["account_name", "date"]
             }
@@ -1137,38 +1046,25 @@ def ask_ai(question: str) -> str:
             "name": "get_main_cash",
             "description": (
                 "Возвращает остатки и итог по всем 15 счетам компании включая кассу наличных. "
-                "ИСПОЛЬЗУЙ ТОЛЬКО ДЛЯ ЭТИХ ВОПРОСОВ: "
-                "'основная касса', 'итого по кассе', 'сколько денег всего', "
-                "'сколько у нас денег', 'деньги на счетах', 'на всех счетах', "
-                "'общий остаток', 'все счета', 'суммарный баланс', 'итого по всем'. "
-                "НЕ используй get_table_data когда спрашивают про все деньги сразу."
+                "ИСПОЛЬЗУЙ ДЛЯ: 'основная касса', 'сколько денег', 'на всех счетах', "
+                "'общий остаток', 'все счета', 'суммарный баланс'. "
+                "НЕ используй get_table_data для этих вопросов."
             ),
-            "input_schema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            "input_schema": {"type": "object", "properties": {}, "required": []}
         },
         {
-            "name": "find_balance_date",
+            "name": "find_operation_by_amount",
             "description": (
-                "Ищет по ВСЕМ счетам и ВСЕМ датам: когда остаток равнялся указанной сумме. "
-                "Используй когда спрашивают: 'какого числа был остаток X', 'когда был остаток X', "
-                "'этот остаток X когда', 'найди дату остатка X', 'в какой день был остаток X'. "
-                "НЕ спрашивай уточнений — сразу ищи по всем счетам."
+                "Ищет операции в реестре по сумме. "
+                "Используй когда спрашивают: 'какого дня эта сумма', 'когда была операция на X', "
+                "'найди день с суммой X', 'какого числа было X тенге'. "
+                "НЕ спрашивай уточнений — ищи сразу по всем счетам и всем датам."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "amount": {
-                        "type": "number",
-                        "description": "Сумма остатка для поиска (число)"
-                    },
-                    "tolerance": {
-                        "type": "number",
-                        "description": "Допуск поиска в тенге (по умолчанию 1.0)",
-                        "default": 1.0
-                    }
+                    "amount": {"type": "number", "description": "Сумма для поиска"},
+                    "tolerance": {"type": "number", "description": "Допуск ±тг (по умолчанию 1.0)", "default": 1.0}
                 },
                 "required": ["amount"]
             }
@@ -1176,17 +1072,12 @@ def ask_ai(question: str) -> str:
         {
             "name": "web_search",
             "description": (
-                "Поиск актуальной информации в интернете. "
-                "Используй для вопросов о погоде, курсах валют, новостях и любой "
-                "информации не связанной с таблицей компании."
+                "Поиск в интернете. Используй для погоды, курсов валют, новостей."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Поисковый запрос."
-                    }
+                    "query": {"type": "string", "description": "Поисковый запрос"}
                 },
                 "required": ["query"]
             }
@@ -1197,34 +1088,21 @@ def ask_ai(question: str) -> str:
         f"Ты финансовый помощник компании. Сегодня {today}.\n"
         "Правила:\n"
         "1. На финансовые вопросы используй get_table_data.\n"
-        "2. КРИТИЧЕСКИ ВАЖНО: если вопрос про конкретный месяц (например 'за май', 'в апреле', 'за март') — "
-        "   ВСЕГДА передавай filter_month с номером этого месяца. НЕ оставляй filter_month пустым!\n"
+        "2. КРИТИЧЕСКИ ВАЖНО: если вопрос про конкретный месяц — ВСЕГДА передавай filter_month.\n"
         "3. Если вопрос про конкретный счёт — передавай filter_account.\n"
-        "4. На общие вопросы (погода, курсы, новости) используй web_search.\n"
+        "4. На вопросы о погоде, курсах, новостях используй web_search.\n"
         "5. Отвечай ТОЛЬКО на русском языке. Будь кратким и точным.\n"
-        "6. Никогда не суммируй данные за весь год если спрашивают про один месяц.\n"
-        "7. ВАЖНО: НЕ используй markdown форматирование в ответах. "
-        "   Никаких звёздочек (**), решёток (#), подчёркиваний (_) и других markdown символов. "
-        "   Пиши обычным текстом, используй только цифры, буквы и знаки препинания.\n"
-        "8. Касса/Сейф — это наличные деньги компании, её остаток может быть отрицательным "
-        "   (если компания ведёт учёт авансов или долгов). Это нормально — не сообщай об ошибке.\n"
-        "9. Если спрашивают 'когда был остаток X', 'какого числа был остаток X', "
-        "   'этот остаток X когда', 'найди дату остатка X', 'в какой день был остаток X' — "
-        "   ОБЯЗАТЕЛЬНО используй find_balance_date с суммой из вопроса. "
-        "   НЕ спрашивай уточнений про счёт или период — ищи сразу по всем счетам. "
-        "   Если дата И счёт указаны явно — тогда используй get_balance_on_date.\n"
-        "10. КРИТИЧЕСКИ ВАЖНО: если спрашивают 'основная касса', 'сколько денег', "
-        "    'сколько у нас денег', 'деньги на всех счетах', 'по всем счетам', "
-        "    'итого по кассе', 'общий остаток', 'все счета', 'суммарный баланс' — "
-        "    ОБЯЗАТЕЛЬНО используй get_main_cash. "
-        "    НЕ используй get_table_data для этих вопросов! "
-        "    get_main_cash считает ВСЕ 15 счетов компании включая кассу наличных.\n"
-        "11. Никогда не отвечай на вопрос про 'все счета' или 'все деньги' используя get_table_data — "
-        "    только get_main_cash даёт полный и правильный список всех 15 счетов.\n"
+        "6. НЕ используй markdown: никаких **, #, _, списков с тире.\n"
+        "7. Касса/Сейф — наличные компании, остаток может быть отрицательным — это нормально.\n"
+        "8. Если спрашивают 'какого дня эта сумма X', 'когда было X тенге', "
+        "   'какого числа операция на X' — СРАЗУ используй find_operation_by_amount. "
+        "   НЕ спрашивай уточнений про счёт — ищи по всем счетам.\n"
+        "9. Если спрашивают 'основная касса', 'сколько денег', 'все счета', "
+        "   'на всех счетах' — используй get_main_cash.\n"
+        "10. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
     )
 
     messages = [{"role": "user", "content": question}]
-
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
@@ -1239,7 +1117,6 @@ def ask_ai(question: str) -> str:
             "tools": tools,
             "messages": messages,
         }
-
         try:
             resp = requests.post(
                 "https://api.anthropic.com/v1/messages",
@@ -1299,37 +1176,40 @@ def ask_ai(question: str) -> str:
                     else:
                         result_content = (
                             f"Остаток по счёту '{acc}' на {date_str}:\n"
-                            f"  Нач. остаток (Справка): {initial:,.2f} тг\n"
-                            f"  + Операции до {date_str} ({ops_count} строк): {ops_total:,.2f} тг\n"
+                            f"  Нач. остаток: {initial:,.2f} тг\n"
+                            f"  + Операции ({ops_count} строк): {ops_total:,.2f} тг\n"
                             f"  = Итого: {balance:,.2f} тг"
                         )
 
                 elif tool_name == "get_main_cash":
-                    summary_text, total = get_main_cash_summary()
+                    summary_text, _ = get_main_cash_summary()
                     result_content = summary_text
 
-                elif tool_name == "find_balance_date":
+                elif tool_name == "find_operation_by_amount":
                     amount = float(tool_input.get("amount", 0))
                     tolerance = float(tool_input.get("tolerance", 1.0))
-                    matches = find_date_by_balance(amount, tolerance=tolerance)
+                    matches = find_operation_by_amount(amount, tolerance=tolerance)
                     if matches:
-                        lines = [f"Остаток {amount:,.0f} тг найден:"]
-                        for acc, date_str, bal in matches:
-                            lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                        lines = [f"Найдено операций с суммой {amount:,.0f} тг: {len(matches)}"]
+                        for acc, date_str, amt, desc in matches[:10]:
+                            sign = "+" if amt > 0 else ""
+                            lines.append(f"  {date_str} | {acc} | {sign}{amt:,.0f} тг | {desc}")
+                        if len(matches) > 10:
+                            lines.append(f"  ... и ещё {len(matches) - 10} совпадений")
                         result_content = "\n".join(lines)
                     else:
-                        matches2 = find_date_by_balance(amount, tolerance=500.0)
+                        matches2 = find_operation_by_amount(amount, tolerance=100.0)
                         if matches2:
-                            lines = [f"Точного совпадения нет. Ближайшие к {amount:,.0f} тг:"]
-                            for acc, date_str, bal in matches2[:5]:
-                                lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                            lines = [f"Точного совпадения нет. Близкие к {amount:,.0f} тг:"]
+                            for acc, date_str, amt, desc in matches2[:5]:
+                                sign = "+" if amt > 0 else ""
+                                lines.append(f"  {date_str} | {acc} | {sign}{amt:,.0f} тг | {desc}")
                             result_content = "\n".join(lines)
                         else:
-                            result_content = f"Остаток {amount:,.0f} тг не найден ни на одном счёте."
+                            result_content = f"Операций с суммой {amount:,.0f} тг не найдено."
 
                 elif tool_name == "web_search":
-                    query = tool_input.get("query", "")
-                    result_content = _do_web_search(query)
+                    result_content = _do_web_search(tool_input.get("query", ""))
 
                 else:
                     result_content = f"Инструмент '{tool_name}' не найден."
@@ -1354,7 +1234,6 @@ def _do_web_search(query: str) -> str:
         params = {"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"}
         resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
-
         results = []
         abstract = data.get("AbstractText", "").strip()
         if abstract:
@@ -1365,13 +1244,13 @@ def _do_web_search(query: str) -> str:
         for item in data.get("RelatedTopics", [])[:3]:
             if isinstance(item, dict) and item.get("Text"):
                 results.append(item["Text"])
-
         return "\n".join(results) if results else f"По запросу '{query}' ничего не найдено."
     except Exception as e:
         return f"Ошибка поиска: {str(e)}"
 
 
 # ============ PDF Kaspi Gold ============
+
 def _parse_kaspi_text_lines(all_text, account):
     rows = []
     lines = all_text.split("\n")
@@ -1429,7 +1308,8 @@ def process_kaspi_gold_pdf(file_bytes):
         for p in pdf.pages:
             all_text += (p.extract_text() or "") + "\n"
 
-        is_deposit = "По Депозиту" in first_text or "На Депозите" in first_text or "KZ19722RU" in first_text
+        is_deposit = ("По Депозиту" in first_text or "На Депозите" in first_text
+                      or "KZ19722RU" in first_text)
 
         m_iban = re.search(r"Номер счета[:\s]+(KZ\w+)", all_text)
         if not m_iban:
@@ -1469,7 +1349,8 @@ def process_kaspi_gold_pdf(file_bytes):
                             desc_cell = f"{op_cell} {det_cell}".strip()
                             if not re.match(r"\d{2}\.\d{2}\.\d{2,4}", date_cell):
                                 continue
-                            amount_clean = amount_cell.replace(" ", "").replace("₸", "").replace("\xa0", "").replace(",", ".")
+                            amount_clean = (amount_cell.replace(" ", "").replace("₸", "")
+                                            .replace("\xa0", "").replace(",", "."))
                             sign = 1
                             if amount_clean.startswith("-"):
                                 sign = -1
@@ -1480,8 +1361,7 @@ def process_kaspi_gold_pdf(file_bytes):
                                 amount = sign * float(amount_clean)
                             except:
                                 continue
-                            date_str = format_date(date_cell)
-                            rows.append(make_row(date_str, amount, account, desc_cell))
+                            rows.append(make_row(format_date(date_cell), amount, account, desc_cell))
         else:
             dep_matches = re.findall(
                 r"На Депозите\s+\d{2}\.\d{2}\.\d{2,4}\s+([\d\s]+[,.][\d]+)\s*₸",
@@ -1498,14 +1378,14 @@ def process_kaspi_gold_pdf(file_bytes):
         total_ops = sum(float(r[4]) for r in rows)
         opening_balance = round(closing_balance - total_ops, 2)
 
-    logger.info(f"Kaspi Gold: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
+    logger.info(f"Kaspi Gold: счет={account}, строк={len(rows)}, вх={opening_balance}, исх={closing_balance}")
     return rows, account, closing_balance, opening_balance
 
 
 # ============ PDF BCC ============
+
 def process_bcc_pdf(file_bytes):
     rows = []
-    iban = ""
     account = "БЦК Ип Серик"
     closing_balance = None
     opening_balance = None
@@ -1521,16 +1401,18 @@ def process_bcc_pdf(file_bytes):
         if not m:
             m = re.search(r"IBAN[:\s]+(KZ\w+)", full_text)
         if m:
-            iban = m.group(1).strip()
-            account = IBAN_MAP.get(iban, iban)
+            account = IBAN_MAP.get(m.group(1).strip(), m.group(1).strip())
 
-        m_open = re.search(r"[Кк]іріс [қк]алдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        m_open = re.search(
+            r"[Кк]іріс [қк]алдық\s*/\s*[Вв]ходящий остаток[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_open:
-            m_open = re.search(r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
+            m_open = re.search(
+                r"[Кк]іріс сальдо\s*/\s*[Вв]ходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if m_open:
             opening_balance = parse_num(m_open.group(1))
 
-        m_bal = re.search(r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
+        m_bal = re.search(
+            r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
             m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
@@ -1540,8 +1422,7 @@ def process_bcc_pdf(file_bytes):
 
         all_table_rows = []
         for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
+            for table in page.extract_tables():
                 for row in table:
                     if row and len(row) >= 12:
                         all_table_rows.append(list(row))
@@ -1576,8 +1457,7 @@ def process_bcc_pdf(file_bytes):
                             else:
                                 glued.append((pv + nv).strip())
                         elif ci in (7, 8):
-                            combined = (pv + nv).replace(" ", "")
-                            glued.append(combined)
+                            glued.append((pv + nv).replace(" ", ""))
                         else:
                             glued.append((pv + " " + nv).strip() if (pv and nv) else (pv or nv))
                     merged_rows.append(glued)
@@ -1599,9 +1479,7 @@ def process_bcc_pdf(file_bytes):
             date_m = re.search(r"(\d{1,2})\.(\d{2})\.(\d{4})", c1)
             if not date_m:
                 continue
-            day = int(date_m.group(1))
-            month = int(date_m.group(2))
-            year = date_m.group(3)
+            day, month, year = int(date_m.group(1)), int(date_m.group(2)), date_m.group(3)
             date_str = f"{month:02d}/{day:02d}/{year}"
             debit = parse_num(c7)
             credit = parse_num(c8)
@@ -1614,11 +1492,12 @@ def process_bcc_pdf(file_bytes):
             desc = f"{c0} {c11}".strip() if c0 else c11
             rows.append(make_row(date_str, amount, account, desc))
 
-    logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
+    logger.info(f"BCC: счет={account}, строк={len(rows)}, вх={opening_balance}, исх={closing_balance}")
     return rows, account, closing_balance, opening_balance
 
 
 # ============ PDF Halyk ============
+
 def parse_kz_num(s):
     s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
     s = re.sub(r",(\d{3})(?=[\d,.])", r"\1", s)
@@ -1642,8 +1521,7 @@ def process_halyk_pdf(file_bytes):
 
     m_iban = re.search(r"Счет\(Валюта\)[:\s]+(KZ[\w]+)", full_text)
     if m_iban:
-        iban = m_iban.group(1).strip()
-        account = IBAN_MAP.get(iban, account)
+        account = IBAN_MAP.get(m_iban.group(1).strip(), account)
 
     m_open = re.search(r"[Вв]ходящий остаток[:\s]*([\d\s,]+\.\d{2})", full_text)
     if m_open:
@@ -1675,8 +1553,7 @@ def process_halyk_pdf(file_bytes):
             continue
         date_raw = m.group(1)
         amount = parse_kz_num(m.group(2))
-        desc_lower = full_desc.lower()
-        if any(kw in desc_lower for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
+        if any(kw in full_desc.lower() for kw in ["снятие", "комиссия", "перевод", "cmstake"]):
             amount = -amount
         d, mo, y = date_raw.split(".")
         date_str = f"{int(mo):02d}/{int(d):02d}/{y}"
@@ -1686,17 +1563,18 @@ def process_halyk_pdf(file_bytes):
         ubs_num = ("00UBS" + ubs_m.group(1)) if ubs_m else ""
         clean_desc = re.sub(r'^\d{2}\.\d{2}\.\d{4}\s+\S+\s+[\d,]+\.\d{2}\s*', '', full_desc).strip()
         if ubs_num:
-            desc_with_docnum = f"{ubs_num} {doc_num} {clean_desc}".strip()
+            desc_final = f"{ubs_num} {doc_num} {clean_desc}".strip()
         elif doc_num:
-            desc_with_docnum = f"{doc_num} {clean_desc}".strip()
+            desc_final = f"{doc_num} {clean_desc}".strip()
         else:
-            desc_with_docnum = clean_desc
-        rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
+            desc_final = clean_desc
+        rows.append(make_row(date_str, amount, account, desc_final[:200]))
 
     return rows, account, closing_balance, opening_balance
 
 
 # ============ XLSX ============
+
 def process_xlsx(file_bytes):
     rows = []
     closing_balance = None
@@ -1755,7 +1633,6 @@ def process_xlsx(file_bytes):
             desc = f"{doc_num_val} {desc_raw}".strip()
         else:
             desc = desc_raw
-
         if not date_val:
             continue
         date_str = format_date(date_val)
@@ -1781,16 +1658,21 @@ def process_xlsx(file_bytes):
 
 
 # ============ ОПРЕДЕЛЕНИЕ ТИПА PDF ============
+
 def detect_pdf_type(first_page_text):
-    if "По Депозиту" in first_page_text or "На Депозите" in first_page_text or "KZ19722RU" in first_page_text:
+    if ("По Депозиту" in first_page_text or "На Депозите" in first_page_text
+            or "KZ19722RU" in first_page_text):
         return "kaspi_deposit"
-    if "СПРАВКА" in first_page_text and ("Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text or "CASPKZKA" in first_page_text):
+    if ("СПРАВКА" in first_page_text
+            and ("Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text
+                 or "CASPKZKA" in first_page_text)):
         return "kaspi_gold"
     if "Kaspi Gold" in first_page_text or "KZ97722C" in first_page_text:
         return "kaspi_gold"
     if "Kaspi Bank" in first_page_text or "CASPKZKA" in first_page_text:
         return "kaspi_gold"
-    if "Народный Банк" in first_page_text or "Halyk" in first_page_text or "HSBKKZKX" in first_page_text:
+    if ("Народный Банк" in first_page_text or "Halyk" in first_page_text
+            or "HSBKKZKX" in first_page_text):
         return "halyk"
     if ("ЦентрКредит" in first_page_text or "ЦентрКре" in first_page_text
             or "KCJBKZKX" in first_page_text
@@ -1800,7 +1682,8 @@ def detect_pdf_type(first_page_text):
     return "kaspi_gold"
 
 
-# ============ HANDLER ============
+# ============ TELEGRAM HANDLER ============
+
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -1812,14 +1695,13 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "👋 Привет! Я бухгалтерский бот.\n\n"
                 "📎 Отправьте файл выписки (.xlsx или .pdf) — загружу в таблицу.\n\n"
-                "💬 Или задайте любой вопрос:\n"
+                "💬 Вопросы:\n"
                 "• Сколько пришло за май по счёту Каспи?\n"
-                "• Какой счёт имеет наибольший оборот?\n"
-                "• Основная касса — сколько денег всего?\n"
-                "• Какой курс доллара сейчас?\n"
-                "• Какая погода в Астане?\n\n"
+                "• Основная касса — сколько денег?\n"
+                "• Какого дня была операция на 685486 тг?\n"
+                "• Какой курс доллара?\n\n"
                 "🔍 Команды:\n"
-                "/rows <название счёта> — показать строки по счёту\n"
+                "/rows <счёт> — строки по счёту\n"
                 "Пример: /rows Каспи ТОО"
             )
             return
@@ -1827,20 +1709,17 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if question.startswith("/rows"):
             acc = question[5:].strip()
             if not acc:
-                await update.message.reply_text("Укажи название счёта после команды.\nПример: /rows Каспи ТОО")
+                await update.message.reply_text("Укажи счёт: /rows Каспи ТОО")
                 return
-
             await update.message.reply_text(f"🔍 Ищу строки для «{acc}»...")
             try:
                 matched = get_account_rows(acc)
             except Exception as e:
                 await update.message.reply_text(f"❌ Ошибка: {e}")
                 return
-
             if not matched:
                 await update.message.reply_text(f"❌ Строк по счёту «{acc}» не найдено.")
                 return
-
             total = 0.0
             for _, row in matched:
                 try:
@@ -1849,14 +1728,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total += val
                 except:
                     pass
-
             header = (
                 f"📋 Счёт: {acc}\n"
                 f"Найдено строк: {len(matched)}\n"
                 f"Сумма операций: {total:,.2f} ₸\n"
                 f"{'─' * 35}\n"
             )
-
             chunk_size = 50
             chunks = [matched[i:i + chunk_size] for i in range(0, len(matched), chunk_size)]
             for part_idx, chunk in enumerate(chunks):
@@ -1868,10 +1745,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     desc_short = (desc[:40] + "…") if len(desc) > 40 else desc
                     lines.append(f"#{sheet_row} | {date} | {amount} | {desc_short}")
                 part_text = "\n".join(lines)
-                if part_idx == 0:
-                    msg = header + part_text
-                else:
-                    msg = f"(продолжение {part_idx + 1}/{len(chunks)})\n" + part_text
+                msg = (header + part_text) if part_idx == 0 else f"(продолжение {part_idx + 1}/{len(chunks)})\n{part_text}"
                 await update.message.reply_text(msg)
             return
 
@@ -1898,8 +1772,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         file = await context.bot.get_file(doc.file_id)
         file_bytes = bytes(await file.download_as_bytearray())
-
-        opening_balance = None
 
         if fname.endswith(".xlsx"):
             rows, account, closing_balance, opening_balance = process_xlsx(file_bytes)
@@ -1931,8 +1803,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for r in rows:
             if is_duplicate(r, existing_keys):
                 dupe_rows.append(r)
-                sheet_row = find_existing_row(r, key_to_row)
-                dupe_sheet_rows.append(sheet_row)
+                dupe_sheet_rows.append(find_existing_row(r, key_to_row))
         dupes = len(dupe_rows)
 
         def format_row_ranges(row_nums):
@@ -1964,8 +1835,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = (
                 f"⚠️ Этот файл уже был загружен ранее!\n"
                 f"Все {len(rows)} строк уже есть в таблице.\n"
-                f"Строки в таблице: {dupe_range}\n"
-                f"Ничего не добавлено."
+                f"Строки в таблице: {dupe_range}\nНичего не добавлено."
             )
             msg += build_balance_msg(account, closing_balance)
             msg += f"\n\n🔗 {SPREADSHEET_URL}"
@@ -1984,7 +1854,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         rows.sort(key=lambda r: datetime.strptime(r[3], "%m/%d/%Y") if r[3] else datetime.min)
-
         actual_start = append_rows_from_col_a(sheet, rows)
         time.sleep(3)
 
@@ -2014,3 +1883,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+ENDOFFILE
+echo "Done"
+Output
+
+Done
