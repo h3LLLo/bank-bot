@@ -44,6 +44,26 @@ IBAN_MAP = {
     "KZ31722RD00029080091": "Депозит Каспи кз",
 }
 
+# Счета, входящие в "основную кассу"
+MAIN_CASH_ACCOUNTS = [
+    "Каспи Имангазиева Зухра",
+    "Каспи СЕРИК",
+    "Каспи Орынбаева",
+    "Каспи КОКО (Сулейменов)",
+    "Каспи ТОО",
+    "Каспи Имангазиева Дильназ",
+    "БЦК ТОО",
+    "Арман каспи голд",
+    "БЦК Имангазиева",
+    "Депозит Каспи Ип Серик",
+    "Депозит Каспи кз",
+    "БЦК Доллары ТОО",
+    "Народный банк Ип Серик",
+    "БЦК Ип Серик",
+    "Касса",  # наличные / сейф
+]
+
+
 def get_spreadsheet():
     creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
     creds = Credentials.from_service_account_info(
@@ -54,8 +74,10 @@ def get_spreadsheet():
     client = gspread.authorize(creds)
     return client.open_by_key(SPREADSHEET_ID)
 
+
 def get_sheet():
     return get_spreadsheet().worksheet(SHEET_NAME)
+
 
 def format_date(val):
     if isinstance(val, datetime):
@@ -78,17 +100,20 @@ def format_date(val):
         return f"{mo:02d}/{d:02d}/{y}"
     return s
 
+
 def get_year_from_date(date_str):
     try:
         return date_str.split("/")[2]
     except:
         return ""
 
+
 def get_month_from_date(date_str):
     try:
         return int(date_str.split("/")[0])
     except:
         return ""
+
 
 def get_month_nachislenia(desc, date_str):
     if desc:
@@ -100,8 +125,8 @@ def get_month_nachislenia(desc, date_str):
                     return int(parts[1])
                 except:
                     pass
-        months = {"январ":1,"феврал":2,"март":3,"апрел":4,"май":5,"мая":5,
-                  "июн":6,"июл":7,"август":8,"сентябр":9,"октябр":10,"ноябр":11,"декабр":12}
+        months = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "май": 5, "мая": 5,
+                  "июн": 6, "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12}
         for w, n in months.items():
             if w in str(desc).lower():
                 return n
@@ -110,20 +135,22 @@ def get_month_nachislenia(desc, date_str):
     except:
         return ""
 
+
 def get_week(date_str):
     try:
         return datetime.strptime(date_str, "%m/%d/%Y").isocalendar()[1]
     except:
         return ""
 
+
 def get_article(desc, amount):
     if not desc:
         return ""
     d = str(desc)
     for kw in ["Оплата за услуги операций по картам Kaspi Gold",
-               "Оплата рекламных услуг","Оплата за услуги процессинга Без НДС",
-               "Оплата услуги по обработке данных","Оплата за информационно-технологические услуги",
-               "Бонусы за отзыв клиенту","Оплата услуг по обработке данных, связанных с доставкой",
+               "Оплата рекламных услуг", "Оплата за услуги процессинга Без НДС",
+               "Оплата услуги по обработке данных", "Оплата за информационно-технологические услуги",
+               "Бонусы за отзыв клиенту", "Оплата услуг по обработке данных, связанных с доставкой",
                "Погашение комиссии за ведение счета",
                "Бонусы клиенту от продаж за"]:
         if kw.lower() in d.lower():
@@ -140,6 +167,7 @@ def get_article(desc, amount):
         return "Оплата от покупателя, выручка"
     return ""
 
+
 def fmt_amount(val):
     try:
         f = float(val)
@@ -147,8 +175,10 @@ def fmt_amount(val):
     except:
         return str(val)
 
+
 def cell_val(cell):
     return cell.value if cell and cell.value is not None else ""
+
 
 def parse_num(s):
     s = str(s or "").replace(" ", "").replace("\xa0", "").replace(",", ".").replace("\n", "")
@@ -157,20 +187,14 @@ def parse_num(s):
     except:
         return 0
 
-def parse_справка_num(s):
-    """
-    ИСПРАВЛЕНО: правильно обрабатывает отрицательные числа (например -970,961)
-    """
-    s = str(s or "").strip().replace("\xa0", "").replace(" ", "")
 
-    # Сохраняем знак минус
+def parse_справка_num(s):
+    s = str(s or "").strip().replace("\xa0", "").replace(" ", "")
     negative = s.startswith("-")
     if negative:
         s = s[1:]
-
     comma_count = s.count(",")
     dot_count = s.count(".")
-
     if comma_count > 1:
         s = s.replace(",", "")
     elif comma_count == 1 and dot_count == 0:
@@ -181,26 +205,22 @@ def parse_справка_num(s):
             s = s.replace(",", ".")
     elif dot_count > 1:
         s = s.replace(".", "")
-
     try:
         result = float(s)
         return -result if negative else result
     except:
         return None
 
+
 def parse_amount_from_registry(s):
     s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
     if not s:
         return None
-
-    # Сохраняем знак минус
     negative = s.startswith("-")
     if negative:
         s = s[1:]
-
     dot_count = s.count(".")
     comma_count = s.count(",")
-
     if dot_count >= 1 and comma_count >= 1:
         s = s.replace(",", "")
     elif comma_count > 1:
@@ -213,12 +233,12 @@ def parse_amount_from_registry(s):
             s = s.replace(",", ".")
     elif dot_count > 1:
         s = s.replace(".", "")
-
     try:
         result = float(s)
         return -result if negative else result
     except:
         return None
+
 
 def make_row(date_str, amount, account, desc, supplier=""):
     year = get_year_from_date(date_str)
@@ -239,6 +259,7 @@ def make_row(date_str, amount, account, desc, supplier=""):
         str(supplier) if supplier else "",
     ]
 
+
 # ============ ДЕДУПЛИКАЦИЯ ============
 
 def _normalize_date(date_str: str) -> str:
@@ -256,13 +277,16 @@ def _normalize_date(date_str: str) -> str:
             pass
     return s
 
+
 def _strip_doc_num(desc: str) -> str:
     return re.sub(r'^\d{7,12}\s+', '', str(desc).strip())
+
 
 def _normalize_desc(desc: str) -> str:
     d = _strip_doc_num(desc)
     d = re.sub(r'\s+', ' ', d.replace("\n", " ").replace("\r", " ")).strip().lower()
     return d
+
 
 def _normalize_amount(amount) -> str:
     amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "").replace(",", "")
@@ -271,12 +295,14 @@ def _normalize_amount(amount) -> str:
     except:
         return amt_str
 
+
 def _normalize_amount_exact(amount) -> str:
     amt_str = str(amount).strip().replace("\xa0", "").replace(" ", "").replace(",", "")
     try:
         return f"{float(amt_str):.2f}"
     except:
         return amt_str
+
 
 def _extract_doc_num(desc_clean: str) -> str:
     desc_lower = desc_clean.lower()
@@ -300,6 +326,7 @@ def _extract_doc_num(desc_clean: str) -> str:
         return m.group(1)
     return ""
 
+
 def _build_all_keys(date, amount, account, desc):
     nd = _normalize_date(str(date).strip())
     acc = str(account).strip()
@@ -320,12 +347,14 @@ def _build_all_keys(date, amount, account, desc):
         keys.append(("amt+text", nd, acc, amt, desc_short))
     return keys
 
+
 def is_duplicate(r, existing_keys: set) -> bool:
     keys = _build_all_keys(r[3], r[4], r[6], r[8])
     for k in keys:
         if k in existing_keys:
             return True
     return False
+
 
 def build_existing_keys(existing_data) -> tuple:
     key_to_row = {}
@@ -346,12 +375,14 @@ def build_existing_keys(existing_data) -> tuple:
                 key_to_row[k] = i
     return key_to_row, set(key_to_row.keys())
 
+
 def find_existing_row(r, key_to_row: dict):
     keys = _build_all_keys(r[3], r[4], r[6], r[8])
     for k in keys:
         if k in key_to_row:
             return key_to_row[k]
     return None
+
 
 def append_rows_from_col_a(sheet, rows):
     all_vals = sheet.get_all_values()
@@ -371,9 +402,9 @@ def append_rows_from_col_a(sheet, rows):
     sheet.update(range_name=range_name, values=rows, value_input_option="USER_ENTERED")
     return start_row
 
+
 # ============ СВЕРКА ОСТАТКОВ ============
 
-# ИСПРАВЛЕНО: добавлены синонимы для кассы и сейфа
 ACCOUNT_SYNONYMS = {
     "халык":       ["халык", "народный", "halyk", "hsbk"],
     "каспи":       ["каспи", "kaspi", "каспий"],
@@ -389,7 +420,6 @@ ACCOUNT_SYNONYMS = {
     "ип":          ["ип", "ip"],
     "депозит":     ["депозит", "deposit"],
     "usd":         ["usd", "доллар"],
-    # НОВОЕ: касса и сейф
     "касса":       ["касса", "сейф", "наличные", "cash", "кассa"],
 }
 
@@ -399,6 +429,7 @@ BANK_CONFLICT_GROUPS = [
     {"бцк", "центркредит"},
     {"втб"},
 ]
+
 
 def _normalize_tokens(name: str) -> set:
     name = name.lower().strip()
@@ -412,6 +443,7 @@ def _normalize_tokens(name: str) -> set:
                 tokens.add(canon)
                 break
     return tokens
+
 
 def _account_similarity(name_a: str, name_b: str) -> float:
     ta = _normalize_tokens(name_a)
@@ -430,16 +462,9 @@ def _account_similarity(name_a: str, name_b: str) -> float:
             score *= 0.3
     return score
 
-def find_account_in_справка(account_name: str, справка_data: list):
-    """
-    ИСПРАВЛЕНО:
-    1. Сначала ищет точное совпадение (без учёта регистра)
-    2. Потом нечёткое — порог снижен с 0.4 до 0.35 для кассы
-    3. Корректно возвращает отрицательные начальные остатки
-    """
-    search = account_name.strip().lower()
 
-    # Точное совпадение
+def find_account_in_справка(account_name: str, справка_data: list):
+    search = account_name.strip().lower()
     for row in справка_data:
         if not row or not row[0].strip():
             continue
@@ -448,8 +473,6 @@ def find_account_in_справка(account_name: str, справка_data: list)
             balance = parse_справка_num(row[1] if len(row) > 1 else "")
             if balance is not None:
                 return candidate, balance
-
-    # Нечёткое совпадение — порог снижен до 0.35
     best_name = None
     best_balance = None
     best_score = 0.0
@@ -462,13 +485,12 @@ def find_account_in_справка(account_name: str, справка_data: list)
             best_score = score
             best_name = candidate
             best_balance = parse_справка_num(row[1] if len(row) > 1 else "")
-
     if best_score >= 0.35 and best_balance is not None:
         logger.info(f"find_account_in_справка: '{account_name}' -> '{best_name}' (score={best_score:.2f}, balance={best_balance})")
         return best_name, best_balance
-
     logger.warning(f"find_account_in_справка: счёт '{account_name}' не найден в справке (best_score={best_score:.2f})")
     return None, None
+
 
 def _clean_name_for_match(s):
     import unicodedata
@@ -479,10 +501,12 @@ def _clean_name_for_match(s):
     words = s.split()
     return " ".join(words).lower()
 
+
 def _matches_account_strict(row_acc, target):
     r = _clean_name_for_match(row_acc)
     t = _clean_name_for_match(target)
     return r == t
+
 
 def _matches_account(row_acc, target):
     r = _clean_name_for_match(row_acc)
@@ -492,6 +516,7 @@ def _matches_account(row_acc, target):
     if _account_similarity(r, t) >= 0.80:
         return True
     return False
+
 
 def get_account_balance(account_name: str):
     spreadsheet = get_spreadsheet()
@@ -524,6 +549,143 @@ def get_account_balance(account_name: str):
     dds = round(initial + ops_total, 2)
     return initial, round(ops_total, 2), dds, ops_count
 
+
+def get_account_balance_on_date(account_name: str, target_date_str: str):
+    """
+    Считает остаток по счёту на конкретную дату.
+    Суммирует начальный остаток из Справки + все операции ДО указанной даты включительно.
+    """
+    target_date = None
+    for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y", "%Y-%m-%d"):
+        try:
+            target_date = datetime.strptime(target_date_str.strip(), fmt)
+            break
+        except:
+            pass
+    if not target_date:
+        return None, None, None, f"Не удалось распознать дату: {target_date_str}"
+
+    spreadsheet = get_spreadsheet()
+    initial = 0.0
+    try:
+        справка = spreadsheet.worksheet("Счета2026(Справка)")
+        справка_data = справка.get_all_values()
+        _, bal = find_account_in_справка(account_name, справка_data)
+        if bal is not None:
+            initial = bal
+    except Exception as e:
+        logger.warning(f"get_account_balance_on_date: справка error: {e}")
+
+    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    ops_total = 0.0
+    ops_count = 0
+
+    for row in реестр_data[1:]:
+        acc_val = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        if not _matches_account_strict(acc_val, account_name):
+            continue
+        row_date = None
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                row_date = datetime.strptime(date_val, fmt)
+                break
+            except:
+                pass
+        if not row_date:
+            continue
+        if row_date <= target_date:
+            parsed = parse_amount_from_registry(amt_val)
+            if parsed is not None:
+                ops_total += parsed
+                ops_count += 1
+
+    balance = round(initial + ops_total, 2)
+    return initial, round(ops_total, 2), balance, ops_count
+
+
+def get_main_cash_summary():
+    """
+    Считает суммарный остаток по всем счетам основной кассы
+    (начальный остаток из Справки + операции из реестра).
+    """
+    spreadsheet = get_spreadsheet()
+
+    initial_balances = {}
+    try:
+        справка = spreadsheet.worksheet("Счета2026(Справка)")
+        справка_data = справка.get_all_values()
+        for row in справка_data:
+            if row and row[0].strip() and len(row) > 1:
+                bal = parse_справка_num(row[1])
+                if bal is not None:
+                    initial_balances[row[0].strip()] = bal
+                    logger.info(f"Справка: {row[0].strip()} = {bal}")
+    except Exception as e:
+        logger.warning(f"get_main_cash_summary: справка error: {e}")
+
+    реестр = spreadsheet.worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    ops_by_account = {acc: 0.0 for acc in MAIN_CASH_ACCOUNTS}
+    count_by_account = {acc: 0 for acc in MAIN_CASH_ACCOUNTS}
+
+    for row in реестр_data[1:]:
+        acc_val = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val = str(row[4]).strip() if len(row) > 4 else ""
+        if not acc_val or not amt_val:
+            continue
+        for target in MAIN_CASH_ACCOUNTS:
+            if _matches_account_strict(acc_val, target):
+                parsed = parse_amount_from_registry(amt_val)
+                if parsed is not None:
+                    ops_by_account[target] += parsed
+                    count_by_account[target] += 1
+                break
+
+    lines = []
+    total = 0.0
+
+    for acc in MAIN_CASH_ACCOUNTS:
+        initial = 0.0
+        found = None
+        for name, bal in initial_balances.items():
+            if name.lower() == acc.lower():
+                initial = bal
+                found = name
+                break
+        if found is None:
+            best_score = 0.0
+            for name, bal in initial_balances.items():
+                score = _account_similarity(acc, name)
+                if score > best_score and score >= 0.35:
+                    best_score = score
+                    initial = bal
+                    found = name
+
+        ops = ops_by_account[acc]
+        current = round(initial + ops, 2)
+        total += current
+
+        if ops != 0 or initial != 0:
+            lines.append(
+                f"  {acc}: {current:,.0f} тг"
+                f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f},"
+                f" {count_by_account[acc]} оп.)"
+            )
+
+    result = "ОСНОВНАЯ КАССА — остатки по счетам:\n"
+    result += "\n".join(lines)
+    result += f"\n{'─' * 40}\n"
+    result += f"ИТОГО ОСНОВНАЯ КАССА: {total:,.0f} тг"
+    return result, round(total, 2)
+
+
 def build_balance_msg(account, bank_closing_balance):
     if bank_closing_balance is None:
         return "\n⚠️ Исходящий остаток не найден в файле"
@@ -550,6 +712,7 @@ def build_balance_msg(account, bank_closing_balance):
     except Exception as e:
         return f"\n⚠️ Ошибка сверки: {e}"
 
+
 def get_account_rows(account_name):
     spreadsheet = get_spreadsheet()
     реестр = spreadsheet.worksheet(SHEET_NAME)
@@ -561,6 +724,7 @@ def get_account_rows(account_name):
             matched.append((i, row))
     return matched
 
+
 # ============ ДАННЫЕ ДЛЯ ИИ ============
 
 def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=100):
@@ -569,7 +733,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         реестр = spreadsheet.worksheet(SHEET_NAME)
         data = реестр.get_all_values()
 
-        # Загружаем начальные остатки из справки
         initial_balances = {}
         try:
             справка = spreadsheet.worksheet("Счета2026(Справка)")
@@ -577,7 +740,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             for row in справка_data:
                 if row and row[0].strip() and len(row) > 1:
                     name = row[0].strip()
-                    # ИСПРАВЛЕНО: используем исправленный parse_справка_num
                     bal = parse_справка_num(row[1])
                     if bal is not None:
                         initial_balances[name] = bal
@@ -601,9 +763,9 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         detail_rows = []
 
         month_names = {
-            "1":"Январь","2":"Февраль","3":"Март","4":"Апрель",
-            "5":"Май","6":"Июнь","7":"Июль","8":"Август",
-            "9":"Сентябрь","10":"Октябрь","11":"Ноябрь","12":"Декабрь"
+            "1": "Январь", "2": "Февраль", "3": "Март", "4": "Апрель",
+            "5": "Май", "6": "Июнь", "7": "Июль", "8": "Август",
+            "9": "Сентябрь", "10": "Октябрь", "11": "Ноябрь", "12": "Декабрь"
         }
 
         has_filter = bool(filter_month or filter_account)
@@ -652,9 +814,9 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             except:
                 continue
 
-        use_month_totals    = filtered_month_totals    if has_filter else month_totals
-        use_account_totals  = filtered_account_totals  if has_filter else account_totals
-        use_article_totals  = filtered_article_totals  if has_filter else article_totals
+        use_month_totals = filtered_month_totals if has_filter else month_totals
+        use_account_totals = filtered_account_totals if has_filter else account_totals
+        use_article_totals = filtered_article_totals if has_filter else article_totals
 
         summary = f"Всего строк в реестре: {len(rows)}\n"
         if has_filter:
@@ -675,22 +837,16 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         else:
             summary += "  (нет данных)\n"
 
-        # ИСПРАВЛЕНО: правильно учитываем начальные остатки для всех счетов
-        # включая кассу с отрицательным остатком
         summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
         total_all = 0.0
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
             initial = 0.0
             found_name = None
-
-            # Сначала точное совпадение
             for name, bal in initial_balances.items():
                 if name.lower() == acc.lower():
                     initial = bal
                     found_name = name
                     break
-
-            # Если не нашли точно — ищем нечётко с порогом 0.35
             if found_name is None:
                 best_score = 0.0
                 for name, bal in initial_balances.items():
@@ -730,6 +886,7 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
 
     except Exception as e:
         return f"Ошибка получения данных: {e}", []
+
 
 # ============ CLAUDE AI ============
 
@@ -780,6 +937,43 @@ def ask_ai(question: str) -> str:
             }
         },
         {
+            "name": "get_balance_on_date",
+            "description": (
+                "Вычисляет остаток по конкретному счёту на указанную дату. "
+                "Используй когда спрашивают: 'когда был остаток X', 'остаток на дату', "
+                "'какого числа остаток составлял X тенге'. "
+                "Суммирует начальный остаток + все операции ДО указанной даты включительно."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "account_name": {
+                        "type": "string",
+                        "description": "Название счёта, например 'Каспи ТОО', 'БЦК Ип Серик'"
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Дата в формате DD.MM.YYYY, например '15.05.2025'"
+                    }
+                },
+                "required": ["account_name", "date"]
+            }
+        },
+        {
+            "name": "get_main_cash",
+            "description": (
+                "Возвращает остатки и итог по 'основной кассе' — "
+                "это все банковские счета компании плюс касса наличных. "
+                "Используй когда спрашивают: 'основная касса', 'итого по кассе', "
+                "'сколько денег всего', 'общий остаток по всем счетам'."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
             "name": "web_search",
             "description": (
                 "Поиск актуальной информации в интернете. "
@@ -813,7 +1007,12 @@ def ask_ai(question: str) -> str:
         "   Никаких звёздочек (**), решёток (#), подчёркиваний (_) и других markdown символов. "
         "   Пиши обычным текстом, используй только цифры, буквы и знаки препинания.\n"
         "8. Касса/Сейф — это наличные деньги компании, её остаток может быть отрицательным "
-        "   (если компания ведёт учёт авансов или долгов). Это нормально — не сообщай об ошибке."
+        "   (если компания ведёт учёт авансов или долгов). Это нормально — не сообщай об ошибке.\n"
+        "9. Если спрашивают 'когда был остаток X' или 'какого числа остаток X' — "
+        "   используй get_balance_on_date. Если дата не указана, попроси уточнить дату и счёт. "
+        "   Никогда не показывай текущий остаток вместо остатка на конкретную дату.\n"
+        "10. Если спрашивают 'основная касса', 'итого по всем счетам', 'сколько денег' — "
+        "    используй get_main_cash. Этот инструмент считает все счета компании + наличные.\n"
     )
 
     messages = [{"role": "user", "content": question}]
@@ -883,6 +1082,24 @@ def ask_ai(question: str) -> str:
                         detail_text = "\n(По заданному фильтру строк не найдено)"
                     result_content = summary + detail_text
 
+                elif tool_name == "get_balance_on_date":
+                    acc = tool_input.get("account_name", "")
+                    date_str = tool_input.get("date", "")
+                    initial, ops_total, balance, ops_count = get_account_balance_on_date(acc, date_str)
+                    if isinstance(ops_count, str):
+                        result_content = f"Ошибка: {ops_count}"
+                    else:
+                        result_content = (
+                            f"Остаток по счёту '{acc}' на {date_str}:\n"
+                            f"  Нач. остаток (Справка): {initial:,.2f} тг\n"
+                            f"  + Операции до {date_str} ({ops_count} строк): {ops_total:,.2f} тг\n"
+                            f"  = Итого: {balance:,.2f} тг"
+                        )
+
+                elif tool_name == "get_main_cash":
+                    summary_text, total = get_main_cash_summary()
+                    result_content = summary_text
+
                 elif tool_name == "web_search":
                     query = tool_input.get("query", "")
                     result_content = _do_web_search(query)
@@ -925,6 +1142,7 @@ def _do_web_search(query: str) -> str:
         return "\n".join(results) if results else f"По запросу '{query}' ничего не найдено."
     except Exception as e:
         return f"Ошибка поиска: {str(e)}"
+
 
 # ============ PDF Kaspi Gold ============
 def _parse_kaspi_text_lines(all_text, account):
@@ -970,6 +1188,7 @@ def _parse_kaspi_text_lines(all_text, account):
         else:
             i += 1
     return rows
+
 
 def process_kaspi_gold_pdf(file_bytes):
     rows = []
@@ -1054,6 +1273,7 @@ def process_kaspi_gold_pdf(file_bytes):
 
     logger.info(f"Kaspi Gold: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
     return rows, account, closing_balance, opening_balance
+
 
 # ============ PDF BCC ============
 def process_bcc_pdf(file_bytes):
@@ -1170,6 +1390,7 @@ def process_bcc_pdf(file_bytes):
     logger.info(f"BCC: счет={account}, строк={len(rows)}, входящий={opening_balance}, исходящий={closing_balance}")
     return rows, account, closing_balance, opening_balance
 
+
 # ============ PDF Halyk ============
 def parse_kz_num(s):
     s = str(s or "").strip().replace(" ", "").replace("\xa0", "")
@@ -1179,6 +1400,7 @@ def parse_kz_num(s):
         return float(s)
     except:
         return 0
+
 
 def process_halyk_pdf(file_bytes):
     rows = []
@@ -1245,6 +1467,7 @@ def process_halyk_pdf(file_bytes):
         rows.append(make_row(date_str, amount, account, desc_with_docnum[:200]))
 
     return rows, account, closing_balance, opening_balance
+
 
 # ============ XLSX ============
 def process_xlsx(file_bytes):
@@ -1329,6 +1552,7 @@ def process_xlsx(file_bytes):
 
     return rows, account, closing_balance, opening_balance
 
+
 # ============ ОПРЕДЕЛЕНИЕ ТИПА PDF ============
 def detect_pdf_type(first_page_text):
     if "По Депозиту" in first_page_text or "На Депозите" in first_page_text or "KZ19722RU" in first_page_text:
@@ -1348,6 +1572,7 @@ def detect_pdf_type(first_page_text):
         return "bcc"
     return "kaspi_gold"
 
+
 # ============ HANDLER ============
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -1363,6 +1588,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "💬 Или задайте любой вопрос:\n"
                 "• Сколько пришло за май по счёту Каспи?\n"
                 "• Какой счёт имеет наибольший оборот?\n"
+                "• Основная касса — сколько денег всего?\n"
                 "• Какой курс доллара сейчас?\n"
                 "• Какая погода в Астане?\n\n"
                 "🔍 Команды:\n"
@@ -1401,11 +1627,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📋 Счёт: {acc}\n"
                 f"Найдено строк: {len(matched)}\n"
                 f"Сумма операций: {total:,.2f} ₸\n"
-                f"{'─'*35}\n"
+                f"{'─' * 35}\n"
             )
 
             chunk_size = 50
-            chunks = [matched[i:i+chunk_size] for i in range(0, len(matched), chunk_size)]
+            chunks = [matched[i:i + chunk_size] for i in range(0, len(matched), chunk_size)]
             for part_idx, chunk in enumerate(chunks):
                 lines = []
                 for sheet_row, row in chunk:
@@ -1418,7 +1644,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if part_idx == 0:
                     msg = header + part_text
                 else:
-                    msg = f"(продолжение {part_idx+1}/{len(chunks)})\n" + part_text
+                    msg = f"(продолжение {part_idx + 1}/{len(chunks)})\n" + part_text
                 await update.message.reply_text(msg)
             return
 
@@ -1557,6 +1783,7 @@ def main():
         url_path="webhook",
         drop_pending_updates=True,
     )
+
 
 if __name__ == "__main__":
     main()
