@@ -682,6 +682,93 @@ def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
     return matches
 
 
+def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
+    """
+    Ищет дату когда накопленная сумма операций по реестру (нарастающим итогом
+    по ВСЕМ счетам вместе) совпадает с target_amount.
+    Также проверяет дневные итоги по каждому счёту отдельно.
+    """
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    # Собираем все операции с датами
+    all_ops = []
+    for row in реестр_data[1:]:
+        acc_val  = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val  = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        row_date = None
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                row_date = datetime.strptime(date_val, fmt)
+                break
+            except:
+                pass
+        if not row_date:
+            continue
+        parsed = parse_amount_from_registry(amt_val)
+        if parsed is not None:
+            all_ops.append((row_date, acc_val, parsed))
+
+    if not all_ops:
+        return []
+
+    matches = []
+
+    # 1. Нарастающий итог по всем счетам вместе
+    all_ops_sorted = sorted(all_ops, key=lambda x: x[0])
+    unique_dates = sorted(set(d for d, _, _ in all_ops_sorted))
+    cumulative = 0.0
+    for check_date in unique_dates:
+        day_sum = sum(amt for dt, _, amt in all_ops_sorted if dt == check_date)
+        cumulative = round(cumulative + day_sum, 2)
+        if abs(cumulative - target_amount) <= tolerance:
+            matches.append(("Все счета (нарастающий)", check_date.strftime("%d.%m.%Y"), cumulative))
+
+    # 2. Нарастающий итог по каждому счёту отдельно
+    ops_by_account = defaultdict(list)
+    for dt, acc, amt in all_ops:
+        ops_by_account[acc].append((dt, amt))
+
+    for account, ops in ops_by_account.items():
+        ops_sorted = sorted(ops, key=lambda x: x[0])
+        unique_acc_dates = sorted(set(d for d, _ in ops_sorted))
+        cumulative_acc = 0.0
+        for check_date in unique_acc_dates:
+            day_sum = sum(amt for dt, amt in ops_sorted if dt == check_date)
+            cumulative_acc = round(cumulative_acc + day_sum, 2)
+            if abs(cumulative_acc - target_amount) <= tolerance:
+                matches.append((account, check_date.strftime("%d.%m.%Y"), cumulative_acc))
+
+    # 3. Сумма операций за конкретный день (по всем счетам вместе)
+    daily_totals = defaultdict(float)
+    for dt, _, amt in all_ops:
+        daily_totals[dt] = round(daily_totals[dt] + amt, 2)
+    for check_date, total in daily_totals.items():
+        if abs(total - target_amount) <= tolerance:
+            matches.append(("Дневной оборот (все счета)", check_date.strftime("%d.%m.%Y"), total))
+
+    # 4. Сумма операций за конкретный день по каждому счёту
+    daily_by_acc = defaultdict(lambda: defaultdict(float))
+    for dt, acc, amt in all_ops:
+        daily_by_acc[acc][dt] = round(daily_by_acc[acc][dt] + amt, 2)
+    for account, days in daily_by_acc.items():
+        for check_date, total in days.items():
+            if abs(total - target_amount) <= tolerance:
+                matches.append((f"{account} (дневной оборот)", check_date.strftime("%d.%m.%Y"), total))
+
+    # Сортируем по дате
+    def sort_key(m):
+        try:
+            return datetime.strptime(m[1], "%d.%m.%Y")
+        except:
+            return datetime.min
+    matches.sort(key=sort_key)
+    return matches
+
+
 def get_main_cash_summary():
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
@@ -959,27 +1046,44 @@ def ask_ai(question: str) -> str:
             logger.error(f"get_main_cash_summary error: {e}")
             return f"❌ Ошибка при расчёте основной кассы: {e}"
 
-    # Быстрый путь: поиск дня по остатку счёта
+    # Быстрый путь: поиск дня по остатку / обороту
     if _is_balance_search_question(question):
         target = _extract_amount_from_question(question)
         logger.info(f"Balance search: text='{question}' -> target={target}")
         if target is not None:
             try:
+                # Сначала ищем по накопленному остатку (начальный + операции)
                 matches = find_date_by_balance(target, tolerance=1.0)
                 if matches:
                     lines = [f"Остаток {target:,.0f} тг найден:"]
                     for acc, date_str, bal in matches:
                         lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
                     return "\n".join(lines)
-                matches2 = find_date_by_balance(target, tolerance=500.0)
-                if matches2:
-                    lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
-                    for acc, date_str, bal in matches2[:5]:
+
+                # Если не нашли — ищем по нарастающему итогу операций реестра
+                matches_daily = find_date_by_daily_total(target, tolerance=1.0)
+                if matches_daily:
+                    lines = [f"Найдено для суммы {target:,.0f} тг:"]
+                    for acc, date_str, bal in matches_daily[:8]:
                         lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
                     return "\n".join(lines)
-                return f"Остаток {target:,.0f} тг не найден ни на одном счёте."
+
+                # Расширяем допуск
+                matches2 = find_date_by_balance(target, tolerance=5000.0)
+                matches_daily2 = find_date_by_daily_total(target, tolerance=5000.0)
+                all_approx = matches2 + matches_daily2
+                if all_approx:
+                    all_approx.sort(key=lambda x: abs(x[2] - target))
+                    lines = [f"Точного совпадения нет. Ближайшие к {target:,.0f} тг:"]
+                    for acc, date_str, bal in all_approx[:6]:
+                        diff = int(round(bal - target))
+                        sign = "+" if diff >= 0 else ""
+                        lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг ({sign}{diff:,})")
+                    return "\n".join(lines)
+
+                return f"Сумма {target:,.0f} тг не найдена ни в остатках, ни в оборотах реестра."
             except Exception as e:
-                logger.error(f"find_date_by_balance error: {e}")
+                logger.error(f"Balance search error: {e}")
         else:
             logger.warning(f"_extract_amount_from_question вернул None для: '{question}'")
 
@@ -1220,21 +1324,30 @@ def ask_ai(question: str) -> str:
                 elif tool_name == "find_date_by_balance_tool":
                     amount = float(tool_input.get("amount", 0))
                     tolerance = float(tool_input.get("tolerance", 1.0))
+                    # Сначала по накопленному остатку
                     matches = find_date_by_balance(amount, tolerance=tolerance)
-                    if matches:
-                        lines = [f"Остаток {amount:,.0f} тг найден:"]
-                        for acc, date_str, bal in matches:
+                    # Потом по нарастающему итогу реестра
+                    matches_daily = find_date_by_daily_total(amount, tolerance=tolerance)
+                    all_matches = matches + matches_daily
+                    if all_matches:
+                        lines = [f"Найдено для суммы {amount:,.0f} тг:"]
+                        for acc, date_str, bal in all_matches[:10]:
                             lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
                         result_content = "\n".join(lines)
                     else:
-                        matches2 = find_date_by_balance(amount, tolerance=500.0)
-                        if matches2:
+                        m2 = find_date_by_balance(amount, tolerance=5000.0)
+                        m2d = find_date_by_daily_total(amount, tolerance=5000.0)
+                        all_approx = m2 + m2d
+                        if all_approx:
+                            all_approx.sort(key=lambda x: abs(x[2] - amount))
                             lines = [f"Точного совпадения нет. Ближайшие к {amount:,.0f} тг:"]
-                            for acc, date_str, bal in matches2[:5]:
-                                lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
+                            for acc, date_str, bal in all_approx[:6]:
+                                diff = int(round(bal - amount))
+                                sign = "+" if diff >= 0 else ""
+                                lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг ({sign}{diff:,})")
                             result_content = "\n".join(lines)
                         else:
-                            result_content = f"Остаток {amount:,.0f} тг не найден ни на одном счёте."
+                            result_content = f"Сумма {amount:,.0f} тг не найдена."
 
                 elif tool_name == "web_search":
                     result_content = _do_web_search(tool_input.get("query", ""))
