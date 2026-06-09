@@ -683,15 +683,9 @@ def find_date_by_balance(target_amount: float, tolerance: float = 1.0):
 
 
 def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
-    """
-    Ищет дату когда накопленная сумма операций по реестру (нарастающим итогом
-    по ВСЕМ счетам вместе) совпадает с target_amount.
-    Также проверяет дневные итоги по каждому счёту отдельно.
-    """
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
 
-    # Собираем все операции с датами
     all_ops = []
     for row in реестр_data[1:]:
         acc_val  = str(row[6]).strip() if len(row) > 6 else ""
@@ -717,7 +711,6 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
 
     matches = []
 
-    # 1. Нарастающий итог по всем счетам вместе
     all_ops_sorted = sorted(all_ops, key=lambda x: x[0])
     unique_dates = sorted(set(d for d, _, _ in all_ops_sorted))
     cumulative = 0.0
@@ -727,7 +720,6 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
         if abs(cumulative - target_amount) <= tolerance:
             matches.append(("Все счета (нарастающий)", check_date.strftime("%d.%m.%Y"), cumulative))
 
-    # 2. Нарастающий итог по каждому счёту отдельно
     ops_by_account = defaultdict(list)
     for dt, acc, amt in all_ops:
         ops_by_account[acc].append((dt, amt))
@@ -742,7 +734,6 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
             if abs(cumulative_acc - target_amount) <= tolerance:
                 matches.append((account, check_date.strftime("%d.%m.%Y"), cumulative_acc))
 
-    # 3. Сумма операций за конкретный день (по всем счетам вместе)
     daily_totals = defaultdict(float)
     for dt, _, amt in all_ops:
         daily_totals[dt] = round(daily_totals[dt] + amt, 2)
@@ -750,7 +741,6 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
         if abs(total - target_amount) <= tolerance:
             matches.append(("Дневной оборот (все счета)", check_date.strftime("%d.%m.%Y"), total))
 
-    # 4. Сумма операций за конкретный день по каждому счёту
     daily_by_acc = defaultdict(lambda: defaultdict(float))
     for dt, acc, amt in all_ops:
         daily_by_acc[acc][dt] = round(daily_by_acc[acc][dt] + amt, 2)
@@ -759,7 +749,6 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
             if abs(total - target_amount) <= tolerance:
                 matches.append((f"{account} (дневной оборот)", check_date.strftime("%d.%m.%Y"), total))
 
-    # Сортируем по дате
     def sort_key(m):
         try:
             return datetime.strptime(m[1], "%d.%m.%Y")
@@ -973,11 +962,20 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
 
 # ============ ДЕТЕКТОР ВОПРОСОВ ============
 
+# ВАЖНО: LIST_ACCOUNTS проверяется ПЕРВЫМ, до MAIN_CASH,
+# чтобы "все счета" в значении "список названий" не уходило в остатки.
+LIST_ACCOUNTS_KEYWORDS = [
+    "список счетов", "напиши все счета", "напиши счета", "покажи все счета",
+    "покажи счета", "какие счета", "какие есть счета", "перечисли счета",
+    "перечисли все счета", "все названия счетов", "названия счетов",
+    "какие у вас счета", "какие счёта", "все счёта", "покажи счёта",
+]
+
 MAIN_CASH_KEYWORDS = [
     "основная касса", "основной кассе", "основную кассу", "основной кассы",
     "сколько денег", "денег всего", "всего денег", "сколько всего денег",
     "на всех счетах", "по всем счетам", "общий остаток", "итого по кассе",
-    "итого по счетам", "итого на счетах", "все счета", "всех счетов",
+    "итого по счетам", "итого на счетах",
     "сколько у нас денег", "сколько денег у нас", "сколько у нас на счетах",
     "общий баланс", "суммарный остаток", "суммарный баланс",
 ]
@@ -992,6 +990,11 @@ BALANCE_SEARCH_KEYWORDS = [
 ]
 
 
+def _is_list_accounts_question(text: str) -> bool:
+    t = text.lower().strip()
+    return any(kw in t for kw in LIST_ACCOUNTS_KEYWORDS)
+
+
 def _is_main_cash_question(text: str) -> bool:
     t = text.lower().strip()
     return any(kw in t for kw in MAIN_CASH_KEYWORDS)
@@ -1002,10 +1005,9 @@ def _is_balance_search_question(text: str) -> bool:
     return any(kw in t for kw in BALANCE_SEARCH_KEYWORDS)
 
 
-# ============ ИСПРАВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА СУММЫ ============
+# ============ ПАРСИНГ СУММЫ ============
 
 def _extract_amount_from_question(text: str):
-    # Мультипроход: убираем все пробелы между цифрами (1 000 000 -> 1000000)
     cleaned = text
     for _ in range(6):
         new = re.sub(r'(\d)\s+(\d)', r'\1\2', cleaned)
@@ -1013,13 +1015,10 @@ def _extract_amount_from_question(text: str):
             break
         cleaned = new
 
-    # Ищем числа (целые и с разделителями)
     amounts = re.findall(r'\d[\d,\.]*\d|\d{4,}', cleaned)
     results = []
     for a in amounts:
-        # Убираем запятые/точки-разделители тысяч (после них ровно 3 цифры)
         a_clean = re.sub(r'[,\.](?=\d{3}(?:[,\.]|$))', '', a)
-        # Оставшуюся запятую меняем на точку (дробная часть)
         a_clean = a_clean.replace(',', '.').replace(' ', '')
         try:
             val = float(a_clean)
@@ -1037,7 +1036,14 @@ def ask_ai(question: str) -> str:
     if not ANTHROPIC_API_KEY:
         return "❌ ANTHROPIC_API_KEY не задан."
 
-    # Быстрый путь: основная касса
+    # Быстрый путь: список названий счетов (проверяем ПЕРВЫМ)
+    if _is_list_accounts_question(question):
+        lines = ["Все счета компании:"]
+        for i, acc in enumerate(MAIN_CASH_ACCOUNTS, 1):
+            lines.append(f"{i}. {acc}")
+        return "\n".join(lines)
+
+    # Быстрый путь: основная касса (остатки)
     if _is_main_cash_question(question):
         try:
             summary_text, _ = get_main_cash_summary()
@@ -1052,7 +1058,6 @@ def ask_ai(question: str) -> str:
         logger.info(f"Balance search: text='{question}' -> target={target}")
         if target is not None:
             try:
-                # Сначала ищем по накопленному остатку (начальный + операции)
                 matches = find_date_by_balance(target, tolerance=1.0)
                 if matches:
                     lines = [f"Остаток {target:,.0f} тг найден:"]
@@ -1060,7 +1065,6 @@ def ask_ai(question: str) -> str:
                         lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
                     return "\n".join(lines)
 
-                # Если не нашли — ищем по нарастающему итогу операций реестра
                 matches_daily = find_date_by_daily_total(target, tolerance=1.0)
                 if matches_daily:
                     lines = [f"Найдено для суммы {target:,.0f} тг:"]
@@ -1068,7 +1072,6 @@ def ask_ai(question: str) -> str:
                         lines.append(f"  {acc}: {date_str} — {bal:,.0f} тг")
                     return "\n".join(lines)
 
-                # Расширяем допуск
                 matches2 = find_date_by_balance(target, tolerance=5000.0)
                 matches_daily2 = find_date_by_daily_total(target, tolerance=5000.0)
                 all_approx = matches2 + matches_daily2
@@ -1143,7 +1146,7 @@ def ask_ai(question: str) -> str:
             "description": (
                 "Возвращает остатки и итог по всем 15 счетам компании включая кассу наличных. "
                 "ИСПОЛЬЗУЙ ДЛЯ: 'основная касса', 'сколько денег', 'на всех счетах', "
-                "'общий остаток', 'все счета', 'суммарный баланс'. "
+                "'общий остаток', 'суммарный баланс'. "
                 "НЕ используй get_table_data для этих вопросов."
             ),
             "input_schema": {"type": "object", "properties": {}, "required": []}
@@ -1208,7 +1211,7 @@ def ask_ai(question: str) -> str:
         "8. Если спрашивают 'какого дня эта сумма X', 'когда было X тенге', "
         "   'какого числа операция на X' — СРАЗУ используй find_operation_by_amount. "
         "   НЕ спрашивай уточнений про счёт — ищи по всем счетам.\n"
-        "9. Если спрашивают 'основная касса', 'сколько денег', 'все счета', "
+        "9. Если спрашивают 'основная касса', 'сколько денег', "
         "   'на всех счетах' — используй get_main_cash.\n"
         "10. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
         "11. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
@@ -1324,9 +1327,7 @@ def ask_ai(question: str) -> str:
                 elif tool_name == "find_date_by_balance_tool":
                     amount = float(tool_input.get("amount", 0))
                     tolerance = float(tool_input.get("tolerance", 1.0))
-                    # Сначала по накопленному остатку
                     matches = find_date_by_balance(amount, tolerance=tolerance)
-                    # Потом по нарастающему итогу реестра
                     matches_daily = find_date_by_daily_total(amount, tolerance=tolerance)
                     all_matches = matches + matches_daily
                     if all_matches:
@@ -1840,7 +1841,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Сколько пришло за май по счёту Каспи?\n"
                 "• Основная касса — сколько денег?\n"
                 "• Какого дня был остаток 685486 тг?\n"
-                "• Какой курс доллара?\n\n"
+                "• Какой курс доллара?\n"
+                "• Напиши все счета\n\n"
                 "🔍 Команды:\n"
                 "/rows <счёт> — строки по счёту\n"
                 "Пример: /rows Каспи ТОО"
