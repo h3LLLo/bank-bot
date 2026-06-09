@@ -59,6 +59,7 @@ MAIN_CASH_ACCOUNTS = [
     "Народный банк Ип Серик",
     "БЦК Ип Серик",
     "Касса",
+    "Основная касса (Сейф)",
 ]
 
 # ============ GOOGLE SHEETS ============
@@ -792,10 +793,10 @@ def get_main_cash_summary():
                 f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
             )
 
-    result = "ОСНОВНАЯ КАССА — остатки по счетам:\n"
+    result = "Остатки по всем счетам:\n"
     result += "\n".join(lines)
     result += f"\n{'─' * 40}\n"
-    result += f"ИТОГО ОСНОВНАЯ КАССА: {total:,.0f} тг"
+    result += f"ИТОГО ПО ВСЕМ СЧЕТАМ: {total:,.0f} тг"
     return result, round(total, 2)
 
 
@@ -962,8 +963,7 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
 
 # ============ ДЕТЕКТОР ВОПРОСОВ ============
 
-# ВАЖНО: LIST_ACCOUNTS проверяется ПЕРВЫМ, до MAIN_CASH,
-# чтобы "все счета" в значении "список названий" не уходило в остатки.
+# 1. Список названий счетов — проверяется ПЕРВЫМ
 LIST_ACCOUNTS_KEYWORDS = [
     "список счетов", "напиши все счета", "напиши счета", "покажи все счета",
     "покажи счета", "какие счета", "какие есть счета", "перечисли счета",
@@ -971,13 +971,21 @@ LIST_ACCOUNTS_KEYWORDS = [
     "какие у вас счета", "какие счёта", "все счёта", "покажи счёта",
 ]
 
-MAIN_CASH_KEYWORDS = [
+# 2. Конкретный счёт "Основная касса (Сейф)" — проверяется ВТОРЫМ
+SEYF_KEYWORDS = [
     "основная касса", "основной кассе", "основную кассу", "основной кассы",
+    "основной кассой", "сейф", "сейфе", "сейфа", "сейфом",
+    "остаток кассы", "остаток по кассе",
+]
+
+# 3. Сводка по всем счетам — проверяется ТРЕТЬИМ
+ALL_ACCOUNTS_KEYWORDS = [
     "сколько денег", "денег всего", "всего денег", "сколько всего денег",
-    "на всех счетах", "по всем счетам", "общий остаток", "итого по кассе",
+    "на всех счетах", "по всем счетам", "общий остаток",
     "итого по счетам", "итого на счетах",
     "сколько у нас денег", "сколько денег у нас", "сколько у нас на счетах",
     "общий баланс", "суммарный остаток", "суммарный баланс",
+    "итого по всем", "общая сумма",
 ]
 
 BALANCE_SEARCH_KEYWORDS = [
@@ -995,9 +1003,14 @@ def _is_list_accounts_question(text: str) -> bool:
     return any(kw in t for kw in LIST_ACCOUNTS_KEYWORDS)
 
 
-def _is_main_cash_question(text: str) -> bool:
+def _is_seyf_question(text: str) -> bool:
     t = text.lower().strip()
-    return any(kw in t for kw in MAIN_CASH_KEYWORDS)
+    return any(kw in t for kw in SEYF_KEYWORDS)
+
+
+def _is_all_accounts_question(text: str) -> bool:
+    t = text.lower().strip()
+    return any(kw in t for kw in ALL_ACCOUNTS_KEYWORDS)
 
 
 def _is_balance_search_question(text: str) -> bool:
@@ -1036,23 +1049,36 @@ def ask_ai(question: str) -> str:
     if not ANTHROPIC_API_KEY:
         return "❌ ANTHROPIC_API_KEY не задан."
 
-    # Быстрый путь: список названий счетов (проверяем ПЕРВЫМ)
+    # 1. Список названий счетов
     if _is_list_accounts_question(question):
         lines = ["Все счета компании:"]
         for i, acc in enumerate(MAIN_CASH_ACCOUNTS, 1):
             lines.append(f"{i}. {acc}")
         return "\n".join(lines)
 
-    # Быстрый путь: основная касса (остатки)
-    if _is_main_cash_question(question):
+    # 2. Конкретный счёт "Основная касса (Сейф)"
+    if _is_seyf_question(question):
+        try:
+            initial, ops_total, dds, ops_count = get_account_balance("Основная касса (Сейф)")
+            return (
+                f"Основная касса (Сейф): {dds:,.0f} тг\n"
+                f"  Нач. остаток: {initial:,.0f} тг\n"
+                f"  + Обороты ({ops_count} оп.): {ops_total:,.0f} тг"
+            )
+        except Exception as e:
+            logger.error(f"seyf balance error: {e}")
+            return f"❌ Ошибка при расчёте основной кассы (Сейф): {e}"
+
+    # 3. Сводка по всем счетам
+    if _is_all_accounts_question(question):
         try:
             summary_text, _ = get_main_cash_summary()
             return summary_text
         except Exception as e:
             logger.error(f"get_main_cash_summary error: {e}")
-            return f"❌ Ошибка при расчёте основной кассы: {e}"
+            return f"❌ Ошибка при расчёте сводки: {e}"
 
-    # Быстрый путь: поиск дня по остатку / обороту
+    # 4. Поиск дня по остатку / обороту
     if _is_balance_search_question(question):
         target = _extract_amount_from_question(question)
         logger.info(f"Balance search: text='{question}' -> target={target}")
@@ -1142,12 +1168,21 @@ def ask_ai(question: str) -> str:
             }
         },
         {
-            "name": "get_main_cash",
+            "name": "get_all_accounts_summary",
             "description": (
-                "Возвращает остатки и итог по всем 15 счетам компании включая кассу наличных. "
-                "ИСПОЛЬЗУЙ ДЛЯ: 'основная касса', 'сколько денег', 'на всех счетах', "
-                "'общий остаток', 'суммарный баланс'. "
-                "НЕ используй get_table_data для этих вопросов."
+                "Возвращает остатки и итог по всем счетам компании. "
+                "ИСПОЛЬЗУЙ ДЛЯ: 'сколько денег', 'на всех счетах', "
+                "'общий остаток', 'суммарный баланс', 'итого по всем счетам'. "
+                "НЕ используй для вопросов про основную кассу (сейф)."
+            ),
+            "input_schema": {"type": "object", "properties": {}, "required": []}
+        },
+        {
+            "name": "get_seyf_balance",
+            "description": (
+                "Возвращает остаток по счёту Основная касса (Сейф). "
+                "ИСПОЛЬЗУЙ ДЛЯ: 'основная касса', 'сейф', 'остаток кассы'. "
+                "Это отдельный счёт наличных, НЕ сводка по всем счетам."
             ),
             "input_schema": {"type": "object", "properties": {}, "required": []}
         },
@@ -1211,10 +1246,12 @@ def ask_ai(question: str) -> str:
         "8. Если спрашивают 'какого дня эта сумма X', 'когда было X тенге', "
         "   'какого числа операция на X' — СРАЗУ используй find_operation_by_amount. "
         "   НЕ спрашивай уточнений про счёт — ищи по всем счетам.\n"
-        "9. Если спрашивают 'основная касса', 'сколько денег', "
-        "   'на всех счетах' — используй get_main_cash.\n"
-        "10. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
-        "11. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
+        "9. Если спрашивают 'сколько денег', 'на всех счетах', 'общий остаток' — "
+        "   используй get_all_accounts_summary.\n"
+        "10. Если спрашивают 'основная касса', 'сейф', 'остаток кассы' — "
+        "    используй get_seyf_balance. Это отдельный счёт, не сводка.\n"
+        "11. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
+        "12. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
         "    используй find_date_by_balance_tool.\n"
     )
 
@@ -1297,9 +1334,17 @@ def ask_ai(question: str) -> str:
                             f"  = Итого: {balance:,.2f} тг"
                         )
 
-                elif tool_name == "get_main_cash":
+                elif tool_name == "get_all_accounts_summary":
                     summary_text, _ = get_main_cash_summary()
                     result_content = summary_text
+
+                elif tool_name == "get_seyf_balance":
+                    initial, ops_total, dds, ops_count = get_account_balance("Основная касса (Сейф)")
+                    result_content = (
+                        f"Основная касса (Сейф): {dds:,.2f} тг\n"
+                        f"  Нач. остаток: {initial:,.2f} тг\n"
+                        f"  + Обороты ({ops_count} оп.): {ops_total:,.2f} тг"
+                    )
 
                 elif tool_name == "find_operation_by_amount":
                     amount = float(tool_input.get("amount", 0))
@@ -1837,9 +1882,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "👋 Привет! Я бухгалтерский бот.\n\n"
                 "📎 Отправьте файл выписки (.xlsx или .pdf) — загружу в таблицу.\n\n"
-                "💬 Вопросы:\n"
+                "💬 Примеры вопросов:\n"
+                "• Сколько денег на всех счетах?\n"
+                "• Основная касса (Сейф) — сколько?\n"
                 "• Сколько пришло за май по счёту Каспи?\n"
-                "• Основная касса — сколько денег?\n"
                 "• Какого дня был остаток 685486 тг?\n"
                 "• Какой курс доллара?\n"
                 "• Напиши все счета\n\n"
