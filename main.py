@@ -924,14 +924,9 @@ def get_account_rows(account_name):
     return matched
 
 
-# ============ ОБОРОТЫ ЗА ПЕРИОД (универсальная функция) ============
+# ============ ОБОРОТЫ ЗА ПЕРИОД ============
 
 def get_turnover_for_range(start_date_str: str, end_date_str: str):
-    """Приход и расход по всем счетам за период (включительно с обеих сторон).
-    Если start_date == end_date — это обороты за один день.
-    Если start_date < end_date — это обороты за диапазон дат.
-    Если start_date = '01.01.YYYY' и задан только end_date — накопленный итог с начала года.
-    """
     start_date = None
     end_date = None
     for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y"):
@@ -995,7 +990,6 @@ def get_turnover_for_range(start_date_str: str, end_date_str: str):
 
 
 def get_daily_summary_for_period(start_date_str: str, end_date_str: str):
-    """Ежедневная сводка остатков по всем счетам за период."""
     start_date = None
     end_date = None
     for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y"):
@@ -1233,7 +1227,6 @@ BALANCE_SEARCH_KEYWORDS = [
     "когда было столько", "когда была такая сумма",
 ]
 
-# Ключевые слова для запросов об оборотах (расход/приход за период)
 TURNOVER_INTENT_KEYWORDS = [
     "потрачено", "потратили", "потрачено за", "потрачено на", "потрачено к",
     "израсходовано", "расход за", "расход на", "расход с",
@@ -1274,17 +1267,13 @@ def _extract_month_from_question(text: str):
 
 
 def _extract_dates_from_question(text: str):
-    """Возвращает список найденных дат (1 или 2) в формате DD.MM.YYYY."""
     dates = []
-
-    # DD.MM.YYYY или DD.MM.YY
     for m in re.finditer(r'\b(\d{1,2})[./](\d{1,2})[./](\d{2,4})\b', text):
         d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
         if len(y) == 2:
             y = "20" + y
         dates.append(f"{d:02d}.{mo:02d}.{y}")
 
-    # "21 февраля", "1 марта" и т.п.
     day_month_map = {
         "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
         "май": 5, "мая": 5, "июн": 6, "июл": 7, "август": 8,
@@ -1303,7 +1292,6 @@ def _extract_dates_from_question(text: str):
 
 
 def _extract_date_from_question(text: str):
-    """Возвращает первую найденную дату в формате DD.MM.YYYY."""
     dates = _extract_dates_from_question(text)
     return dates[0] if dates else None
 
@@ -1334,7 +1322,6 @@ def _is_balance_search_question(text: str) -> bool:
 
 
 def _is_turnover_intent_question(text: str) -> bool:
-    """Проверяет, спрашивают ли про обороты/расходы/приходы за период."""
     t = text.lower().strip()
     return any(kw in t for kw in TURNOVER_INTENT_KEYWORDS)
 
@@ -1410,34 +1397,39 @@ def ask_ai(question: str) -> str:
             logger.error(f"seyf balance error: {e}")
             return f"❌ Ошибка при расчёте основной кассы (Сейф): {e}"
 
-    # 3. Обороты/расходы/приходы за период — ГЛАВНЫЙ БЛОК
-    # Срабатывает если есть намерение узнать обороты + хотя бы одна дата
+    # 3. Обороты/расходы/приходы за период
+    # Сначала собираем даты и определяем намерение
     _dates = _extract_dates_from_question(question)
     _has_turnover_intent = _is_turnover_intent_question(question)
-    # Также срабатывает если "сколько денег" + дата (дата = конкретный день, а не сводка)
     _has_money_with_date = _is_all_accounts_question(question) and len(_dates) > 0
+
+    # ИСПРАВЛЕНИЕ: если есть намерение оборотов, но нет явных дат —
+    # пробуем извлечь месяц и построить диапазон из него
+    if _has_turnover_intent and not _dates:
+        month_num = _extract_month_from_question(question)
+        if month_num:
+            now = datetime.now()
+            year = now.year if month_num <= now.month else now.year - 1
+            last_day = calendar.monthrange(year, month_num)[1]
+            _dates = [f"01.{month_num:02d}.{year}", f"{last_day:02d}.{month_num:02d}.{year}"]
 
     if (_has_turnover_intent or _has_money_with_date) and len(_dates) > 0:
         try:
             if len(_dates) == 2:
-                # Явно указан диапазон: "с 1 февраля до 22 февраля"
                 return get_turnover_for_range(_dates[0], _dates[1])
             else:
-                # Одна дата — определяем семантику предлога
                 t = question.lower()
-                # "потрачено НА 21 февраля" / "К 21 февраля" / "ДО 21 февраля" = накопленно с начала года
                 if any(kw in t for kw in [" на ", " к ", " до ", "к концу", "до конца"]):
                     year = datetime.now().year
                     start = f"01.01.{year}"
                     return get_turnover_for_range(start, _dates[0])
                 else:
-                    # "потрачено ЗА 21 февраля" / "за день" = только этот день
                     return get_turnover_for_range(_dates[0], _dates[0])
         except Exception as e:
             logger.error(f"get_turnover_for_range error: {e}")
             return f"❌ Ошибка при расчёте оборотов: {e}"
 
-    # 4. Сводка по всем счетам (без даты)
+    # 4. Сводка по всем счетам (без даты / с месяцем)
     if _is_all_accounts_question(question):
         month_filter = _extract_month_from_question(question)
         if month_filter:
@@ -1563,7 +1555,9 @@ def ask_ai(question: str) -> str:
                 "Возвращает остатки по всем счетам на конец указанного месяца. "
                 "ИСПОЛЬЗУЙ когда спрашивают 'сколько денег было в [месяц]', "
                 "'остатки на конец [месяц]', 'сколько было на счетах в [месяц]'. "
-                "Считает все операции вплоть до последнего дня месяца включительно."
+                "Считает все операции вплоть до последнего дня месяца включительно. "
+                "НЕ используй для вопросов про расходы/обороты — "
+                "для них используй get_turnover_for_range."
             ),
             "input_schema": {
                 "type": "object",
@@ -1634,6 +1628,7 @@ def ask_ai(question: str) -> str:
                 "'сколько потрачено на 21 февраля' (start=01.01.YYYY, end=21.02), "
                 "'сколько ушло денег к концу февраля' (start=01.01.YYYY, end=28.02), "
                 "'обороты за февраль' (start=01.02, end=28.02), "
+                "'сколько потрачено в мае' (start=01.05, end=31.05), "
                 "'сколько денег было потрачено с 1 февраля до 22 февраля'. "
                 "НЕ использовать для вопросов об остатках (балансах) — "
                 "для остатков используй get_all_accounts_summary или get_balance_on_date."
@@ -1692,8 +1687,8 @@ def ask_ai(question: str) -> str:
         "   НЕ спрашивай уточнений про счёт — ищи по всем счетам.\n"
         "9. Если спрашивают 'сколько денег', 'на всех счетах', 'общий остаток' БЕЗ указания дат — "
         "   используй get_all_accounts_summary.\n"
-        "10. Если спрашивают 'сколько денег было в [месяц]', 'остатки на конец [месяц]' — "
-        "    используй get_all_accounts_summary_on_month.\n"
+        "10. Если спрашивают 'сколько денег было в [месяц]', 'остатки на конец [месяц]', "
+        "    'сколько было на счетах в [месяц]' — используй get_all_accounts_summary_on_month.\n"
         "11. Если спрашивают 'обороты за [месяц]', 'приход/расход за [месяц]', 'статьи за [месяц]' — "
         "    используй get_table_data с filter_month.\n"
         "12. Если спрашивают 'основная касса', 'сейф', 'остаток кассы' — "
@@ -1709,6 +1704,13 @@ def ask_ai(question: str) -> str:
         "    'обороты за февраль' = get_turnover_for_range(start=01.02, end=28.02)\n"
         "17. Если спрашивают 'покажи по дням', 'ежедневные остатки', 'динамика по дням' — "
         "    используй get_daily_summary_for_period.\n"
+        "18. КРИТИЧЕСКИ ВАЖНО — различай расходы и остатки:\n"
+        "    'потрачено в мае', 'расход в мае', 'сколько потрачено в мае', 'обороты в мае' — "
+        "    это get_turnover_for_range(start=01.05.YYYY, end=31.05.YYYY). НЕ остатки!\n"
+        "    'сколько денег было в мае', 'остатки в мае', 'баланс в мае' — "
+        "    это get_all_accounts_summary_on_month(month=5). НЕ обороты!\n"
+        "    Ключевые слова расходов: потрачено, расход, израсходовано, ушло, пришло, обороты.\n"
+        "    Ключевые слова остатков: было, остаток, баланс, на счетах, сколько денег.\n"
     )
 
     messages = [{"role": "user", "content": question}]
@@ -2381,6 +2383,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "💬 Примеры вопросов:\n"
                 "• Сколько денег на всех счетах?\n"
                 "• Сколько денег было в январе?\n"
+                "• Сколько потрачено в мае?\n"
                 "• Обороты за март по статьям?\n"
                 "• Основная касса (Сейф) — сколько?\n"
                 "• Сколько потрачено за 21 февраля?\n"
