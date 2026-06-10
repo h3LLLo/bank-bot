@@ -3,6 +3,7 @@ import re
 import json
 import logging
 import time
+import calendar
 import requests
 from collections import defaultdict
 from io import BytesIO
@@ -265,7 +266,6 @@ def make_row(date_str, amount, account, desc, supplier=""):
 
 
 def get_last_operation_date(реестр_data) -> str:
-    """Возвращает дату последней (максимальной) операции в реестре."""
     last_date = None
     for row in реестр_data[1:]:
         date_val = str(row[3]).strip() if len(row) > 3 else ""
@@ -777,6 +777,7 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
 
 
 def get_main_cash_summary():
+    """Текущие остатки по всем счетам (все операции без фильтра по дате)."""
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -812,6 +813,67 @@ def get_main_cash_summary():
         )
 
     result = f"Остатки по всем счетам на {data_date}:\n"
+    result += "\n".join(lines)
+    result += f"\n{'─' * 40}\n"
+    result += f"ИТОГО ПО ВСЕМ СЧЕТАМ: {total:,.0f} тг"
+    return result, round(total, 2)
+
+
+def _last_day_of_month(year: int, month: int) -> datetime:
+    """Возвращает последний момент последнего дня указанного месяца."""
+    last_day = calendar.monthrange(year, month)[1]
+    return datetime(year, month, last_day, 23, 59, 59)
+
+
+def get_main_cash_summary_on_date(target_date: datetime):
+    """
+    Остатки по всем счетам на конкретную дату (включительно).
+    Учитываются только операции <= target_date.
+    """
+    initial_balances = _load_initial_balances()
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    ops_by_account = {acc: 0.0 for acc in MAIN_CASH_ACCOUNTS}
+    count_by_account = {acc: 0 for acc in MAIN_CASH_ACCOUNTS}
+
+    for row in реестр_data[1:]:
+        acc_val  = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val  = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        row_date = None
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                row_date = datetime.strptime(date_val, fmt)
+                break
+            except:
+                pass
+        if not row_date or row_date > target_date:
+            continue
+        for target_acc in MAIN_CASH_ACCOUNTS:
+            if _matches_account_strict(acc_val, target_acc):
+                parsed = parse_amount_from_registry(amt_val)
+                if parsed is not None:
+                    ops_by_account[target_acc] += parsed
+                    count_by_account[target_acc] += 1
+                break
+
+    date_label = target_date.strftime("%d.%m.%Y")
+    lines = []
+    total = 0.0
+    for acc in MAIN_CASH_ACCOUNTS:
+        initial = _get_initial_for_account(acc, initial_balances)
+        ops = ops_by_account[acc]
+        current = round(initial + ops, 2)
+        total += current
+        lines.append(
+            f"  {acc}: {current:,.0f} тг"
+            f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
+        )
+
+    result = f"Остатки по всем счетам на {date_label}:\n"
     result += "\n".join(lines)
     result += f"\n{'─' * 40}\n"
     result += f"ИТОГО ПО ВСЕМ СЧЕТАМ: {total:,.0f} тг"
@@ -1015,12 +1077,18 @@ BALANCE_SEARCH_KEYWORDS = [
     "когда было столько", "когда была такая сумма",
 ]
 
-# Словарь для извлечения месяца из текста
 MONTH_KEYWORDS = {
     "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
     "май": 5, "мая": 5, "июн": 6, "июл": 7, "август": 8,
     "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
 }
+
+# Ключевые слова, которые означают "остатки на конец периода", а не "обороты за период"
+BALANCE_AT_DATE_KEYWORDS = [
+    "сколько было", "сколько денег было", "остаток на конец", "остаток в конце",
+    "остатки на", "сколько на счетах было", "сколько у нас было",
+    "на всех счетах было", "баланс на конец", "баланс в",
+]
 
 
 def _extract_month_from_question(text: str):
@@ -1029,13 +1097,18 @@ def _extract_month_from_question(text: str):
     for kw, num in MONTH_KEYWORDS.items():
         if kw in t:
             return num
-    # Ищем "за N месяц" / "в N месяце" / "N-й месяц"
     m = re.search(r'\b(\d{1,2})\s*месяц', t)
     if m:
         val = int(m.group(1))
         if 1 <= val <= 12:
             return val
     return None
+
+
+def _is_balance_at_date_question(text: str) -> bool:
+    """Проверяет, спрашивают ли про остатки на конец периода (а не обороты)."""
+    t = text.lower()
+    return any(kw in t for kw in BALANCE_AT_DATE_KEYWORDS)
 
 
 def _is_list_accounts_question(text: str) -> bool:
@@ -1129,27 +1202,32 @@ def ask_ai(question: str) -> str:
             logger.error(f"seyf balance error: {e}")
             return f"❌ Ошибка при расчёте основной кассы (Сейф): {e}"
 
-    # 3. Сводка по всем счетам — с учётом возможного фильтра по месяцу
+    # 3. Сводка по всем счетам
     if _is_all_accounts_question(question):
         month_filter = _extract_month_from_question(question)
         if month_filter:
-            # Вопрос про обороты за конкретный месяц, а не про текущий остаток
+            # Есть конкретный месяц — определяем: остатки на конец месяца или обороты за месяц
             try:
-                month_names = {
+                now = datetime.now()
+                # Если месяц в будущем — берём прошлый год
+                year = now.year if month_filter <= now.month else now.year - 1
+                end_of_month = _last_day_of_month(year, month_filter)
+
+                month_names_map = {
                     1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
                     5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
                     9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
                 }
-                summary, _ = get_sheets_data_for_ai(
-                    filter_month=str(month_filter),
-                    limit_rows=0,
-                )
-                return summary
+
+                # Возвращаем остатки на конец месяца (включая все операции до конца этого месяца)
+                summary_text, _ = get_main_cash_summary_on_date(end_of_month)
+                return summary_text
+
             except Exception as e:
-                logger.error(f"get_sheets_data_for_ai (month filter) error: {e}")
+                logger.error(f"get_main_cash_summary_on_date error: {e}")
                 return f"❌ Ошибка при расчёте за месяц: {e}"
         else:
-            # Нет месяца — возвращаем текущие остатки по всем счетам
+            # Нет месяца — возвращаем текущие остатки
             try:
                 summary_text, _ = get_main_cash_summary()
                 return summary_text
@@ -1247,13 +1325,37 @@ def ask_ai(question: str) -> str:
         {
             "name": "get_all_accounts_summary",
             "description": (
-                "Возвращает остатки и итог по всем счетам компании. "
+                "Возвращает ТЕКУЩИЕ остатки и итог по всем счетам компании. "
                 "ИСПОЛЬЗУЙ ДЛЯ: 'сколько денег', 'на всех счетах', "
                 "'общий остаток', 'суммарный баланс', 'итого по всем счетам'. "
                 "НЕ используй для вопросов про основную кассу (сейф). "
-                "НЕ используй если в вопросе упомянут конкретный месяц — тогда используй get_table_data с filter_month."
+                "НЕ используй если в вопросе упомянут конкретный месяц — "
+                "тогда используй get_all_accounts_summary_on_month."
             ),
             "input_schema": {"type": "object", "properties": {}, "required": []}
+        },
+        {
+            "name": "get_all_accounts_summary_on_month",
+            "description": (
+                "Возвращает остатки по всем счетам на конец указанного месяца. "
+                "ИСПОЛЬЗУЙ когда спрашивают 'сколько денег было в [месяц]', "
+                "'остатки на конец [месяц]', 'сколько было на счетах в [месяц]'. "
+                "Считает все операции вплоть до последнего дня месяца включительно."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "month": {
+                        "type": "integer",
+                        "description": "Номер месяца от 1 до 12. Январь=1 ... Декабрь=12."
+                    },
+                    "year": {
+                        "type": "integer",
+                        "description": "Год (например 2026). Если не указан — текущий год."
+                    }
+                },
+                "required": ["month"]
+            }
         },
         {
             "name": "get_seyf_balance",
@@ -1326,14 +1428,17 @@ def ask_ai(question: str) -> str:
         "   НЕ спрашивай уточнений про счёт — ищи по всем счетам.\n"
         "9. Если спрашивают 'сколько денег', 'на всех счетах', 'общий остаток' БЕЗ указания месяца — "
         "   используй get_all_accounts_summary.\n"
-        "10. Если спрашивают 'сколько денег за [месяц]', 'обороты за [месяц]', 'итого за [месяц]' — "
-        "    используй get_table_data с filter_month. НЕ используй get_all_accounts_summary!\n"
-        "11. Если спрашивают 'основная касса', 'сейф', 'остаток кассы' — "
+        "10. Если спрашивают 'сколько денег было в [месяц]', 'остатки на конец [месяц]', "
+        "    'сколько было на счетах в [месяц]' — используй get_all_accounts_summary_on_month. "
+        "    НЕ используй get_all_accounts_summary или get_table_data для таких вопросов!\n"
+        "11. Если спрашивают 'обороты за [месяц]', 'приход/расход за [месяц]', 'статьи за [месяц]' — "
+        "    используй get_table_data с filter_month.\n"
+        "12. Если спрашивают 'основная касса', 'сейф', 'остаток кассы' — "
         "    используй get_seyf_balance. Это отдельный счёт, не сводка.\n"
-        "12. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
-        "13. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
+        "13. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
+        "14. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
         "    используй find_date_by_balance_tool.\n"
-        "14. В финансовых ответах дата расчёта берётся из данных (дата последней операции), "
+        "15. В финансовых ответах дата расчёта берётся из данных (дата последней операции), "
         "    она уже включена в ответ инструментов — просто передай её пользователю.\n"
     )
 
@@ -1419,6 +1524,17 @@ def ask_ai(question: str) -> str:
                 elif tool_name == "get_all_accounts_summary":
                     summary_text, _ = get_main_cash_summary()
                     result_content = summary_text
+
+                elif tool_name == "get_all_accounts_summary_on_month":
+                    month = int(tool_input.get("month", datetime.now().month))
+                    now = datetime.now()
+                    year = int(tool_input.get("year", now.year if month <= now.month else now.year - 1))
+                    try:
+                        end_of_month = _last_day_of_month(year, month)
+                        summary_text, _ = get_main_cash_summary_on_date(end_of_month)
+                        result_content = summary_text
+                    except Exception as e:
+                        result_content = f"Ошибка расчёта остатков на конец месяца: {e}"
 
                 elif tool_name == "get_seyf_balance":
                     spreadsheet = get_spreadsheet()
@@ -1984,7 +2100,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📎 Отправьте файл выписки (.xlsx или .pdf) — загружу в таблицу.\n\n"
                 "💬 Примеры вопросов:\n"
                 "• Сколько денег на всех счетах?\n"
-                "• Сколько денег за январь?\n"
+                "• Сколько денег было в январе?\n"
+                "• Обороты за март по статьям?\n"
                 "• Основная касса (Сейф) — сколько?\n"
                 "• Сколько пришло за май по счёту Каспи?\n"
                 "• Какого дня был остаток 685486 тг?\n"
