@@ -53,7 +53,6 @@ MAIN_CASH_ACCOUNTS = [
     "Каспи Имангазиева Дильназ",
     "БЦК ТОО",
     "Арман каспи голд",
-    "БЦК Имангазиева",
     "Депозит Каспи Ип Серик",
     "Депозит Каспи кз",
     "БЦК Доллары ТОО",
@@ -61,6 +60,16 @@ MAIN_CASH_ACCOUNTS = [
     "БЦК Ип Серик",
     "Основная касса (Сейф)",
 ]
+
+# Закрытые счета — не учитываются в сводках ДДС
+EXCLUDED_ACCOUNTS = {
+    "Подотчётные деньги",
+    "ВТБ",
+    "Народный банк Имангазиева",
+    "БЦК Имангазиева",
+    "БЦК Орынбаева",
+    "Депозит Имангазиева",
+}
 
 # ============ GOOGLE SHEETS ============
 
@@ -792,6 +801,8 @@ def get_main_cash_summary():
         amt_val = str(row[4]).strip() if len(row) > 4 else ""
         if not acc_val or not amt_val:
             continue
+        if acc_val in EXCLUDED_ACCOUNTS:
+            continue
         for target in MAIN_CASH_ACCOUNTS:
             if _matches_account_strict(acc_val, target):
                 parsed = parse_amount_from_registry(amt_val)
@@ -820,16 +831,12 @@ def get_main_cash_summary():
 
 
 def _last_day_of_month(year: int, month: int) -> datetime:
-    """Возвращает последний момент последнего дня указанного месяца."""
     last_day = calendar.monthrange(year, month)[1]
     return datetime(year, month, last_day, 23, 59, 59)
 
 
 def get_main_cash_summary_on_date(target_date: datetime):
-    """
-    Остатки по всем счетам на конкретную дату (включительно).
-    Учитываются только операции <= target_date.
-    """
+    """Остатки по всем счетам на конкретную дату (включительно)."""
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -842,6 +849,8 @@ def get_main_cash_summary_on_date(target_date: datetime):
         amt_val  = str(row[4]).strip() if len(row) > 4 else ""
         date_val = str(row[3]).strip() if len(row) > 3 else ""
         if not acc_val or not amt_val or not date_val:
+            continue
+        if acc_val in EXCLUDED_ACCOUNTS:
             continue
         row_date = None
         for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
@@ -918,6 +927,149 @@ def get_account_rows(account_name):
     return matched
 
 
+# ============ ЕЖЕДНЕВНЫЕ ОБОРОТЫ (НОВОЕ) ============
+
+def get_daily_turnover(target_date_str: str):
+    """Считает приход и расход по всем счетам за конкретный день."""
+    target_date = None
+    for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y", "%Y-%m-%d"):
+        try:
+            target_date = datetime.strptime(target_date_str.strip(), fmt)
+            break
+        except:
+            pass
+    if not target_date:
+        return f"Не удалось распознать дату: {target_date_str}"
+
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    income = 0.0
+    expense = 0.0
+    ops = []
+
+    for row in реестр_data[1:]:
+        acc_val  = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val  = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        desc_val = str(row[8]).strip() if len(row) > 8 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        if acc_val in EXCLUDED_ACCOUNTS:
+            continue
+        row_date = None
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                row_date = datetime.strptime(date_val, fmt)
+                break
+            except:
+                pass
+        if not row_date or row_date.date() != target_date.date():
+            continue
+        parsed = parse_amount_from_registry(amt_val)
+        if parsed is None:
+            continue
+        if parsed > 0:
+            income += parsed
+        else:
+            expense += parsed
+        ops.append((acc_val, parsed, desc_val[:60]))
+
+    date_label = target_date.strftime("%d.%m.%Y")
+    if not ops:
+        return f"Операций за {date_label} не найдено."
+
+    lines = [f"Обороты за {date_label}: {len(ops)} операций"]
+    lines.append(f"  Приход:  +{income:,.0f} тг")
+    lines.append(f"  Расход:  {expense:,.0f} тг")
+    lines.append(f"  Нетто:   {income + expense:,.0f} тг")
+    lines.append("Детально:")
+    for acc, amt, desc in ops:
+        sign = "+" if amt > 0 else ""
+        lines.append(f"  {acc} | {sign}{amt:,.0f} тг | {desc}")
+    return "\n".join(lines)
+
+
+def get_daily_summary_for_period(start_date_str: str, end_date_str: str):
+    """Ежедневная сводка остатков по всем счетам за период."""
+    start_date = None
+    end_date = None
+    for fmt in ("%d.%m.%Y", "%m/%d/%Y", "%d.%m.%y"):
+        if not start_date:
+            try:
+                start_date = datetime.strptime(start_date_str.strip(), fmt)
+            except:
+                pass
+        if not end_date:
+            try:
+                end_date = datetime.strptime(end_date_str.strip(), fmt)
+            except:
+                pass
+    if not start_date or not end_date:
+        return f"Не удалось распознать даты: {start_date_str} — {end_date_str}"
+
+    initial_balances = _load_initial_balances()
+    реестр = get_spreadsheet().worksheet(SHEET_NAME)
+    реестр_data = реестр.get_all_values()
+
+    # Собираем все операции до конца периода
+    all_ops = []
+    for row in реестр_data[1:]:
+        acc_val  = str(row[6]).strip() if len(row) > 6 else ""
+        amt_val  = str(row[4]).strip() if len(row) > 4 else ""
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        if not acc_val or not amt_val or not date_val:
+            continue
+        if acc_val in EXCLUDED_ACCOUNTS:
+            continue
+        row_date = None
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                row_date = datetime.strptime(date_val, fmt)
+                break
+            except:
+                pass
+        if not row_date or row_date > end_date:
+            continue
+        parsed = parse_amount_from_registry(amt_val)
+        if parsed is not None:
+            all_ops.append((row_date, acc_val, parsed))
+
+    # Уникальные даты внутри периода
+    period_dates = sorted(set(
+        d.date() for d, _, _ in all_ops
+        if start_date.date() <= d.date() <= end_date.date()
+    ))
+
+    if not period_dates:
+        return f"Операций в периоде {start_date_str} — {end_date_str} не найдено."
+
+    lines = [f"Ежедневные итоги за {start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}:"]
+    lines.append(f"{'Дата':<12} {'Приход':>14} {'Расход':>14} {'Нетто':>14} {'Итого счета':>16}")
+    lines.append("─" * 72)
+
+    for check_date in period_dates:
+        check_dt = datetime(check_date.year, check_date.month, check_date.day, 23, 59, 59)
+        day_income = sum(amt for dt, _, amt in all_ops if dt.date() == check_date and amt > 0)
+        day_expense = sum(amt for dt, _, amt in all_ops if dt.date() == check_date and amt < 0)
+        # Суммарный остаток на конец дня
+        total_balance = 0.0
+        for acc in MAIN_CASH_ACCOUNTS:
+            initial = _get_initial_for_account(acc, initial_balances)
+            ops_sum = sum(amt for dt, a, amt in all_ops if _matches_account_strict(a, acc) and dt <= check_dt)
+            total_balance += initial + ops_sum
+        netto = day_income + day_expense
+        lines.append(
+            f"{check_date.strftime('%d.%m.%Y'):<12}"
+            f" {day_income:>+14,.0f}"
+            f" {day_expense:>14,.0f}"
+            f" {netto:>+14,.0f}"
+            f" {total_balance:>16,.0f}"
+        )
+
+    return "\n".join(lines)
+
+
 # ============ ДАННЫЕ ДЛЯ ИИ ============
 
 def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=100):
@@ -931,7 +1083,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             return "Данных в таблице пока нет.", []
 
         rows = data[1:]
-
         data_date = get_last_operation_date(data)
 
         month_totals = {}
@@ -957,6 +1108,10 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
                 article = row[7] if len(row) > 7 else ""
                 date_str = row[3] if len(row) > 3 else ""
                 desc = row[8] if len(row) > 8 else ""
+
+                if account in EXCLUDED_ACCOUNTS:
+                    continue
+
                 amount = parse_amount_from_registry(amount_str)
                 if amount is None:
                     continue
@@ -1077,13 +1232,20 @@ BALANCE_SEARCH_KEYWORDS = [
     "когда было столько", "когда была такая сумма",
 ]
 
+DAILY_TURNOVER_KEYWORDS = [
+    "потрачено за", "потрачено на", "израсходовано за", "израсходовано на",
+    "расход за", "расход на", "приход за", "приход на",
+    "обороты за", "обороты на", "сколько пришло", "сколько ушло",
+    "сколько потрачено", "сколько израсходовано",
+    "операции за", "операции на", "транзакции за",
+]
+
 MONTH_KEYWORDS = {
     "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
     "май": 5, "мая": 5, "июн": 6, "июл": 7, "август": 8,
     "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
 }
 
-# Ключевые слова, которые означают "остатки на конец периода", а не "обороты за период"
 BALANCE_AT_DATE_KEYWORDS = [
     "сколько было", "сколько денег было", "остаток на конец", "остаток в конце",
     "остатки на", "сколько на счетах было", "сколько у нас было",
@@ -1092,7 +1254,6 @@ BALANCE_AT_DATE_KEYWORDS = [
 
 
 def _extract_month_from_question(text: str):
-    """Извлекает номер месяца из текста вопроса. Возвращает int или None."""
     t = text.lower()
     for kw, num in MONTH_KEYWORDS.items():
         if kw in t:
@@ -1105,8 +1266,33 @@ def _extract_month_from_question(text: str):
     return None
 
 
+def _extract_date_from_question(text: str):
+    """Пытается найти конкретную дату (DD.MM.YYYY или DD.MM.YY или 'DD месяц') в вопросе."""
+    # Формат DD.MM.YYYY или DD.MM.YY
+    m = re.search(r'\b(\d{1,2})[./](\d{1,2})[./](\d{2,4})\b', text)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        if len(y) == 2:
+            y = "20" + y
+        return f"{d:02d}.{mo:02d}.{y}"
+    # Формат "18 февраля", "18 февраль"
+    day_month_map = {
+        "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
+        "май": 5, "мая": 5, "июн": 6, "июл": 7, "август": 8,
+        "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+    }
+    t = text.lower()
+    for kw, month_num in day_month_map.items():
+        pattern = rf'\b(\d{{1,2}})\s+{kw}\w*'
+        dm = re.search(pattern, t)
+        if dm:
+            day = int(dm.group(1))
+            year = datetime.now().year
+            return f"{day:02d}.{month_num:02d}.{year}"
+    return None
+
+
 def _is_balance_at_date_question(text: str) -> bool:
-    """Проверяет, спрашивают ли про остатки на конец периода (а не обороты)."""
     t = text.lower()
     return any(kw in t for kw in BALANCE_AT_DATE_KEYWORDS)
 
@@ -1129,6 +1315,11 @@ def _is_all_accounts_question(text: str) -> bool:
 def _is_balance_search_question(text: str) -> bool:
     t = text.lower().strip()
     return any(kw in t for kw in BALANCE_SEARCH_KEYWORDS)
+
+
+def _is_daily_turnover_question(text: str) -> bool:
+    t = text.lower().strip()
+    return any(kw in t for kw in DAILY_TURNOVER_KEYWORDS)
 
 
 # ============ ПАРСИНГ СУММЫ ============
@@ -1202,32 +1393,30 @@ def ask_ai(question: str) -> str:
             logger.error(f"seyf balance error: {e}")
             return f"❌ Ошибка при расчёте основной кассы (Сейф): {e}"
 
-    # 3. Сводка по всем счетам
+    # 3. Ежедневные обороты — быстрый путь если есть дата в вопросе
+    if _is_daily_turnover_question(question):
+        date_str = _extract_date_from_question(question)
+        if date_str:
+            try:
+                return get_daily_turnover(date_str)
+            except Exception as e:
+                logger.error(f"get_daily_turnover error: {e}")
+                return f"❌ Ошибка при расчёте оборотов за день: {e}"
+
+    # 4. Сводка по всем счетам
     if _is_all_accounts_question(question):
         month_filter = _extract_month_from_question(question)
         if month_filter:
-            # Есть конкретный месяц — определяем: остатки на конец месяца или обороты за месяц
             try:
                 now = datetime.now()
-                # Если месяц в будущем — берём прошлый год
                 year = now.year if month_filter <= now.month else now.year - 1
                 end_of_month = _last_day_of_month(year, month_filter)
-
-                month_names_map = {
-                    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
-                    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
-                    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
-                }
-
-                # Возвращаем остатки на конец месяца (включая все операции до конца этого месяца)
                 summary_text, _ = get_main_cash_summary_on_date(end_of_month)
                 return summary_text
-
             except Exception as e:
                 logger.error(f"get_main_cash_summary_on_date error: {e}")
                 return f"❌ Ошибка при расчёте за месяц: {e}"
         else:
-            # Нет месяца — возвращаем текущие остатки
             try:
                 summary_text, _ = get_main_cash_summary()
                 return summary_text
@@ -1235,7 +1424,7 @@ def ask_ai(question: str) -> str:
                 logger.error(f"get_main_cash_summary error: {e}")
                 return f"❌ Ошибка при расчёте сводки: {e}"
 
-    # 4. Поиск дня по остатку / обороту
+    # 5. Поиск дня по остатку / обороту
     if _is_balance_search_question(question):
         target = _extract_amount_from_question(question)
         logger.info(f"Balance search: text='{question}' -> target={target}")
@@ -1401,6 +1590,39 @@ def ask_ai(question: str) -> str:
             }
         },
         {
+            "name": "get_daily_turnover",
+            "description": (
+                "Считает обороты (приход и расход) по всем счетам за конкретный день. "
+                "ИСПОЛЬЗУЙ ДЛЯ: 'сколько потрачено 18 февраля', 'сколько пришло 5 марта', "
+                "'обороты за 18.02', 'расход за день X', 'операции за 18 февраля'. "
+                "Возвращает приход, расход, нетто и детальный список операций за день."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "Дата в формате DD.MM.YYYY"}
+                },
+                "required": ["date"]
+            }
+        },
+        {
+            "name": "get_daily_summary_for_period",
+            "description": (
+                "Строит ежедневную таблицу оборотов и остатков за указанный период. "
+                "ИСПОЛЬЗУЙ ДЛЯ: 'покажи по дням за февраль', 'ежедневные остатки за январь', "
+                "'динамика по дням', 'обороты по дням за период'. "
+                "Возвращает строку на каждый день: приход, расход, нетто, итоговый остаток."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "start_date": {"type": "string", "description": "Начало периода DD.MM.YYYY"},
+                    "end_date": {"type": "string", "description": "Конец периода DD.MM.YYYY"}
+                },
+                "required": ["start_date", "end_date"]
+            }
+        },
+        {
             "name": "web_search",
             "description": "Поиск в интернете. Используй для погоды, курсов валют, новостей.",
             "input_schema": {
@@ -1440,6 +1662,12 @@ def ask_ai(question: str) -> str:
         "    используй find_date_by_balance_tool.\n"
         "15. В финансовых ответах дата расчёта берётся из данных (дата последней операции), "
         "    она уже включена в ответ инструментов — просто передай её пользователю.\n"
+        "16. Если спрашивают 'сколько потрачено/пришло [дата]', 'обороты за [дата]', "
+        "    'расход/приход за [дата]', 'операции за [дата]' — "
+        "    СРАЗУ используй get_daily_turnover с этой датой. "
+        "    НЕ спрашивай уточнений — считай по всем счетам.\n"
+        "17. Если спрашивают 'покажи по дням', 'ежедневные остатки', 'динамика по дням' — "
+        "    используй get_daily_summary_for_period.\n"
     )
 
     messages = [{"role": "user", "content": question}]
@@ -1610,6 +1838,15 @@ def ask_ai(question: str) -> str:
                             result_content = "\n".join(lines)
                         else:
                             result_content = f"Сумма {amount:,.0f} тг не найдена."
+
+                elif tool_name == "get_daily_turnover":
+                    date_str = tool_input.get("date", "")
+                    result_content = get_daily_turnover(date_str)
+
+                elif tool_name == "get_daily_summary_for_period":
+                    start_date = tool_input.get("start_date", "")
+                    end_date = tool_input.get("end_date", "")
+                    result_content = get_daily_summary_for_period(start_date, end_date)
 
                 elif tool_name == "web_search":
                     result_content = _do_web_search(tool_input.get("query", ""))
@@ -1817,7 +2054,7 @@ def process_bcc_pdf(file_bytes):
         m_bal = re.search(
             r"[Шш]ығыс сальдо\s*/\s*[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if not m_bal:
-            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
+            m_bal = re.search(r"[Ии]сходящее сальдо[:\s]*([\д\s]+[,.][\d]+)", full_text)
         if not m_bal:
             m_bal = re.search(r"[Шш]ығыс сальдо[:\s]*([\d\s]+[,.][\d]+)", full_text)
         if m_bal:
@@ -2104,6 +2341,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Обороты за март по статьям?\n"
                 "• Основная касса (Сейф) — сколько?\n"
                 "• Сколько пришло за май по счёту Каспи?\n"
+                "• Сколько потрачено 18 февраля?\n"
+                "• Покажи обороты по дням за январь\n"
                 "• Какого дня был остаток 685486 тг?\n"
                 "• Какой курс доллара?\n"
                 "• Напиши все счета\n\n"
