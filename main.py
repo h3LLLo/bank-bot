@@ -781,7 +781,6 @@ def get_main_cash_summary():
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
 
-    # Дата последней операции вместо сегодняшней даты
     data_date = get_last_operation_date(реестр_data)
 
     ops_by_account = {acc: 0.0 for acc in MAIN_CASH_ACCOUNTS}
@@ -871,7 +870,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
 
         rows = data[1:]
 
-        # Дата последней операции вместо сегодняшней даты
         data_date = get_last_operation_date(data)
 
         month_totals = {}
@@ -1017,6 +1015,28 @@ BALANCE_SEARCH_KEYWORDS = [
     "когда было столько", "когда была такая сумма",
 ]
 
+# Словарь для извлечения месяца из текста
+MONTH_KEYWORDS = {
+    "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
+    "май": 5, "мая": 5, "июн": 6, "июл": 7, "август": 8,
+    "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+}
+
+
+def _extract_month_from_question(text: str):
+    """Извлекает номер месяца из текста вопроса. Возвращает int или None."""
+    t = text.lower()
+    for kw, num in MONTH_KEYWORDS.items():
+        if kw in t:
+            return num
+    # Ищем "за N месяц" / "в N месяце" / "N-й месяц"
+    m = re.search(r'\b(\d{1,2})\s*месяц', t)
+    if m:
+        val = int(m.group(1))
+        if 1 <= val <= 12:
+            return val
+    return None
+
 
 def _is_list_accounts_question(text: str) -> bool:
     t = text.lower().strip()
@@ -1109,14 +1129,33 @@ def ask_ai(question: str) -> str:
             logger.error(f"seyf balance error: {e}")
             return f"❌ Ошибка при расчёте основной кассы (Сейф): {e}"
 
-    # 3. Сводка по всем счетам
+    # 3. Сводка по всем счетам — с учётом возможного фильтра по месяцу
     if _is_all_accounts_question(question):
-        try:
-            summary_text, _ = get_main_cash_summary()
-            return summary_text
-        except Exception as e:
-            logger.error(f"get_main_cash_summary error: {e}")
-            return f"❌ Ошибка при расчёте сводки: {e}"
+        month_filter = _extract_month_from_question(question)
+        if month_filter:
+            # Вопрос про обороты за конкретный месяц, а не про текущий остаток
+            try:
+                month_names = {
+                    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+                    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+                    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+                }
+                summary, _ = get_sheets_data_for_ai(
+                    filter_month=str(month_filter),
+                    limit_rows=0,
+                )
+                return summary
+            except Exception as e:
+                logger.error(f"get_sheets_data_for_ai (month filter) error: {e}")
+                return f"❌ Ошибка при расчёте за месяц: {e}"
+        else:
+            # Нет месяца — возвращаем текущие остатки по всем счетам
+            try:
+                summary_text, _ = get_main_cash_summary()
+                return summary_text
+            except Exception as e:
+                logger.error(f"get_main_cash_summary error: {e}")
+                return f"❌ Ошибка при расчёте сводки: {e}"
 
     # 4. Поиск дня по остатку / обороту
     if _is_balance_search_question(question):
@@ -1211,7 +1250,8 @@ def ask_ai(question: str) -> str:
                 "Возвращает остатки и итог по всем счетам компании. "
                 "ИСПОЛЬЗУЙ ДЛЯ: 'сколько денег', 'на всех счетах', "
                 "'общий остаток', 'суммарный баланс', 'итого по всем счетам'. "
-                "НЕ используй для вопросов про основную кассу (сейф)."
+                "НЕ используй для вопросов про основную кассу (сейф). "
+                "НЕ используй если в вопросе упомянут конкретный месяц — тогда используй get_table_data с filter_month."
             ),
             "input_schema": {"type": "object", "properties": {}, "required": []}
         },
@@ -1284,14 +1324,16 @@ def ask_ai(question: str) -> str:
         "8. Если спрашивают 'какого дня эта сумма X', 'когда было X тенге', "
         "   'какого числа операция на X' — СРАЗУ используй find_operation_by_amount. "
         "   НЕ спрашивай уточнений про счёт — ищи по всем счетам.\n"
-        "9. Если спрашивают 'сколько денег', 'на всех счетах', 'общий остаток' — "
+        "9. Если спрашивают 'сколько денег', 'на всех счетах', 'общий остаток' БЕЗ указания месяца — "
         "   используй get_all_accounts_summary.\n"
-        "10. Если спрашивают 'основная касса', 'сейф', 'остаток кассы' — "
+        "10. Если спрашивают 'сколько денег за [месяц]', 'обороты за [месяц]', 'итого за [месяц]' — "
+        "    используй get_table_data с filter_month. НЕ используй get_all_accounts_summary!\n"
+        "11. Если спрашивают 'основная касса', 'сейф', 'остаток кассы' — "
         "    используй get_seyf_balance. Это отдельный счёт, не сводка.\n"
-        "11. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
-        "12. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
+        "12. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
+        "13. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
         "    используй find_date_by_balance_tool.\n"
-        "13. В финансовых ответах дата расчёта берётся из данных (дата последней операции), "
+        "14. В финансовых ответах дата расчёта берётся из данных (дата последней операции), "
         "    она уже включена в ответ инструментов — просто передай её пользователю.\n"
     )
 
@@ -1942,6 +1984,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📎 Отправьте файл выписки (.xlsx или .pdf) — загружу в таблицу.\n\n"
                 "💬 Примеры вопросов:\n"
                 "• Сколько денег на всех счетах?\n"
+                "• Сколько денег за январь?\n"
                 "• Основная касса (Сейф) — сколько?\n"
                 "• Сколько пришло за май по счёту Каспи?\n"
                 "• Какого дня был остаток 685486 тг?\n"
