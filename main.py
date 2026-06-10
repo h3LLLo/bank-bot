@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -54,6 +53,7 @@ MAIN_CASH_ACCOUNTS = [
     "Каспи Имангазиева Дильназ",
     "БЦК ТОО",
     "Арман каспи голд",
+    "БЦК Имангазиева",
     "Депозит Каспи Ип Серик",
     "Депозит Каспи кз",
     "БЦК Доллары ТОО",
@@ -61,16 +61,6 @@ MAIN_CASH_ACCOUNTS = [
     "БЦК Ип Серик",
     "Основная касса (Сейф)",
 ]
-
-# Закрытые счета — не учитываются в сводках ДДС
-EXCLUDED_ACCOUNTS = {
-    "Подотчётные деньги",
-    "ВТБ",
-    "Народный банк Имангазиева",
-    "БЦК Имангазиева",
-    "БЦК Орынбаева",
-    "Депозит Имангазиева",
-}
 
 # ============ GOOGLE SHEETS ============
 
@@ -802,8 +792,6 @@ def get_main_cash_summary():
         amt_val = str(row[4]).strip() if len(row) > 4 else ""
         if not acc_val or not amt_val:
             continue
-        if acc_val in EXCLUDED_ACCOUNTS:
-            continue
         for target in MAIN_CASH_ACCOUNTS:
             if _matches_account_strict(acc_val, target):
                 parsed = parse_amount_from_registry(amt_val)
@@ -832,12 +820,16 @@ def get_main_cash_summary():
 
 
 def _last_day_of_month(year: int, month: int) -> datetime:
+    """Возвращает последний момент последнего дня указанного месяца."""
     last_day = calendar.monthrange(year, month)[1]
     return datetime(year, month, last_day, 23, 59, 59)
 
 
 def get_main_cash_summary_on_date(target_date: datetime):
-    """Остатки по всем счетам на конкретную дату (включительно)."""
+    """
+    Остатки по всем счетам на конкретную дату (включительно).
+    Учитываются только операции <= target_date.
+    """
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -850,8 +842,6 @@ def get_main_cash_summary_on_date(target_date: datetime):
         amt_val  = str(row[4]).strip() if len(row) > 4 else ""
         date_val = str(row[3]).strip() if len(row) > 3 else ""
         if not acc_val or not amt_val or not date_val:
-            continue
-        if acc_val in EXCLUDED_ACCOUNTS:
             continue
         row_date = None
         for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
@@ -967,11 +957,6 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
                 article = row[7] if len(row) > 7 else ""
                 date_str = row[3] if len(row) > 3 else ""
                 desc = row[8] if len(row) > 8 else ""
-
-                # Пропускаем закрытые счета
-                if account in EXCLUDED_ACCOUNTS:
-                    continue
-
                 amount = parse_amount_from_registry(amount_str)
                 if amount is None:
                     continue
@@ -1098,6 +1083,7 @@ MONTH_KEYWORDS = {
     "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
 }
 
+# Ключевые слова, которые означают "остатки на конец периода", а не "обороты за период"
 BALANCE_AT_DATE_KEYWORDS = [
     "сколько было", "сколько денег было", "остаток на конец", "остаток в конце",
     "остатки на", "сколько на счетах было", "сколько у нас было",
@@ -1106,6 +1092,7 @@ BALANCE_AT_DATE_KEYWORDS = [
 
 
 def _extract_month_from_question(text: str):
+    """Извлекает номер месяца из текста вопроса. Возвращает int или None."""
     t = text.lower()
     for kw, num in MONTH_KEYWORDS.items():
         if kw in t:
@@ -1119,6 +1106,7 @@ def _extract_month_from_question(text: str):
 
 
 def _is_balance_at_date_question(text: str) -> bool:
+    """Проверяет, спрашивают ли про остатки на конец периода (а не обороты)."""
     t = text.lower()
     return any(kw in t for kw in BALANCE_AT_DATE_KEYWORDS)
 
@@ -1218,16 +1206,28 @@ def ask_ai(question: str) -> str:
     if _is_all_accounts_question(question):
         month_filter = _extract_month_from_question(question)
         if month_filter:
+            # Есть конкретный месяц — определяем: остатки на конец месяца или обороты за месяц
             try:
                 now = datetime.now()
+                # Если месяц в будущем — берём прошлый год
                 year = now.year if month_filter <= now.month else now.year - 1
                 end_of_month = _last_day_of_month(year, month_filter)
+
+                month_names_map = {
+                    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+                    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+                    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+                }
+
+                # Возвращаем остатки на конец месяца (включая все операции до конца этого месяца)
                 summary_text, _ = get_main_cash_summary_on_date(end_of_month)
                 return summary_text
+
             except Exception as e:
                 logger.error(f"get_main_cash_summary_on_date error: {e}")
                 return f"❌ Ошибка при расчёте за месяц: {e}"
         else:
+            # Нет месяца — возвращаем текущие остатки
             try:
                 summary_text, _ = get_main_cash_summary()
                 return summary_text
