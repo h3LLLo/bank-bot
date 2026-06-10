@@ -759,6 +759,7 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
 
 
 def get_main_cash_summary():
+    today = datetime.now().strftime("%d.%m.%Y")  # <-- дата расчёта
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
@@ -786,13 +787,12 @@ def get_main_cash_summary():
         ops = ops_by_account[acc]
         current = round(initial + ops, 2)
         total += current
-        # ✅ ИСПРАВЛЕНО: показываем все счета из списка, даже если сумма 0
         lines.append(
             f"  {acc}: {current:,.0f} тг"
             f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
         )
 
-    result = "Остатки по всем счетам:\n"
+    result = f"Остатки по всем счетам на {today}:\n"  # <-- дата в заголовке
     result += "\n".join(lines)
     result += f"\n{'─' * 40}\n"
     result += f"ИТОГО ПО ВСЕМ СЧЕТАМ: {total:,.0f} тг"
@@ -909,7 +909,8 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         use_account_totals = filtered_account_totals if has_filter else account_totals
         use_article_totals = filtered_article_totals if has_filter else article_totals
 
-        summary = f"Всего строк в реестре: {len(rows)}\n"
+        today = datetime.now().strftime("%d.%m.%Y")  # <-- дата для сводки
+        summary = f"Данные на {today}. Всего строк в реестре: {len(rows)}\n"
         if has_filter:
             parts = []
             if filter_month:
@@ -927,7 +928,7 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         else:
             summary += "  (нет данных)\n"
 
-        summary += "\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ:\n"
+        summary += f"\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ (на {today}):\n"
         total_all = 0.0
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
             initial = _get_initial_for_account(acc, initial_balances)
@@ -1045,6 +1046,8 @@ def ask_ai(question: str) -> str:
     if not ANTHROPIC_API_KEY:
         return "❌ ANTHROPIC_API_KEY не задан."
 
+    today = datetime.now().strftime("%d.%m.%Y")
+
     # 1. Список названий счетов
     if _is_list_accounts_question(question):
         lines = ["Все счета компании:"]
@@ -1057,7 +1060,7 @@ def ask_ai(question: str) -> str:
         try:
             initial, ops_total, dds, ops_count = get_account_balance("Основная касса (Сейф)")
             return (
-                f"Основная касса (Сейф): {dds:,.0f} тг\n"
+                f"Основная касса (Сейф) на {today}: {dds:,.0f} тг\n"
                 f"  Нач. остаток: {initial:,.0f} тг\n"
                 f"  + Обороты ({ops_count} оп.): {ops_total:,.0f} тг"
             )
@@ -1111,8 +1114,6 @@ def ask_ai(question: str) -> str:
                 logger.error(f"Balance search error: {e}")
         else:
             logger.warning(f"_extract_amount_from_question вернул None для: '{question}'")
-
-    today = datetime.now().strftime("%d.%m.%Y")
 
     tools = [
         {
@@ -1249,6 +1250,7 @@ def ask_ai(question: str) -> str:
         "11. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
         "12. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
         "    используй find_date_by_balance_tool.\n"
+        f"13. В каждом финансовом ответе ОБЯЗАТЕЛЬНО указывай дату расчёта: {today}.\n"
     )
 
     messages = [{"role": "user", "content": question}]
@@ -1337,7 +1339,7 @@ def ask_ai(question: str) -> str:
                 elif tool_name == "get_seyf_balance":
                     initial, ops_total, dds, ops_count = get_account_balance("Основная касса (Сейф)")
                     result_content = (
-                        f"Основная касса (Сейф): {dds:,.2f} тг\n"
+                        f"Основная касса (Сейф) на {today}: {dds:,.2f} тг\n"
                         f"  Нач. остаток: {initial:,.2f} тг\n"
                         f"  + Обороты ({ops_count} оп.): {ops_total:,.2f} тг"
                     )
@@ -1913,8 +1915,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total += val
                 except:
                     pass
+            today = datetime.now().strftime("%d.%m.%Y")
             header = (
                 f"📋 Счёт: {acc}\n"
+                f"На дату: {today}\n"
                 f"Найдено строк: {len(matched)}\n"
                 f"Сумма операций: {total:,.2f} ₸\n"
                 f"{'─' * 35}\n"
