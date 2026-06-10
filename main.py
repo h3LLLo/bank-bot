@@ -264,6 +264,24 @@ def make_row(date_str, amount, account, desc, supplier=""):
     ]
 
 
+def get_last_operation_date(реестр_data) -> str:
+    """Возвращает дату последней (максимальной) операции в реестре."""
+    last_date = None
+    for row in реестр_data[1:]:
+        date_val = str(row[3]).strip() if len(row) > 3 else ""
+        if not date_val:
+            continue
+        for fmt in ("%m/%d/%Y", "%d.%m.%Y", "%m/%d/%y"):
+            try:
+                d = datetime.strptime(date_val, fmt)
+                if last_date is None or d > last_date:
+                    last_date = d
+                break
+            except:
+                pass
+    return last_date.strftime("%d.%m.%Y") if last_date else datetime.now().strftime("%d.%m.%Y")
+
+
 # ============ ДЕДУПЛИКАЦИЯ ============
 
 def _normalize_date(date_str: str) -> str:
@@ -759,10 +777,12 @@ def find_date_by_daily_total(target_amount: float, tolerance: float = 1.0):
 
 
 def get_main_cash_summary():
-    today = datetime.now().strftime("%d.%m.%Y")  # <-- дата расчёта
     initial_balances = _load_initial_balances()
     реестр = get_spreadsheet().worksheet(SHEET_NAME)
     реестр_data = реестр.get_all_values()
+
+    # Дата последней операции вместо сегодняшней даты
+    data_date = get_last_operation_date(реестр_data)
 
     ops_by_account = {acc: 0.0 for acc in MAIN_CASH_ACCOUNTS}
     count_by_account = {acc: 0 for acc in MAIN_CASH_ACCOUNTS}
@@ -792,7 +812,7 @@ def get_main_cash_summary():
             f"  (нач.: {initial:,.0f} + обороты: {ops:,.0f}, {count_by_account[acc]} оп.)"
         )
 
-    result = f"Остатки по всем счетам на {today}:\n"  # <-- дата в заголовке
+    result = f"Остатки по всем счетам на {data_date}:\n"
     result += "\n".join(lines)
     result += f"\n{'─' * 40}\n"
     result += f"ИТОГО ПО ВСЕМ СЧЕТАМ: {total:,.0f} тг"
@@ -850,6 +870,10 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
             return "Данных в таблице пока нет.", []
 
         rows = data[1:]
+
+        # Дата последней операции вместо сегодняшней даты
+        data_date = get_last_operation_date(data)
+
         month_totals = {}
         account_totals = {}
         article_totals = {}
@@ -909,8 +933,7 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         use_account_totals = filtered_account_totals if has_filter else account_totals
         use_article_totals = filtered_article_totals if has_filter else article_totals
 
-        today = datetime.now().strftime("%d.%m.%Y")  # <-- дата для сводки
-        summary = f"Данные на {today}. Всего строк в реестре: {len(rows)}\n"
+        summary = f"Данные по состоянию на {data_date}. Всего строк в реестре: {len(rows)}\n"
         if has_filter:
             parts = []
             if filter_month:
@@ -928,7 +951,7 @@ def get_sheets_data_for_ai(filter_account=None, filter_month=None, limit_rows=10
         else:
             summary += "  (нет данных)\n"
 
-        summary += f"\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ (на {today}):\n"
+        summary += f"\nТЕКУЩИЕ ОСТАТКИ ПО КАЖДОМУ СЧЕТУ (на {data_date}):\n"
         total_all = 0.0
         for acc, ops_total in sorted(account_totals.items(), key=lambda x: x[0]):
             initial = _get_initial_for_account(acc, initial_balances)
@@ -1058,9 +1081,27 @@ def ask_ai(question: str) -> str:
     # 2. Конкретный счёт "Основная касса (Сейф)"
     if _is_seyf_question(question):
         try:
-            initial, ops_total, dds, ops_count = get_account_balance("Основная касса (Сейф)")
+            spreadsheet = get_spreadsheet()
+            реестр = spreadsheet.worksheet(SHEET_NAME)
+            реестр_data = реестр.get_all_values()
+            data_date = get_last_operation_date(реестр_data)
+            initial_balances = _load_initial_balances()
+            initial = _get_initial_for_account("Основная касса (Сейф)", initial_balances)
+            ops_total = 0.0
+            ops_count = 0
+            for row in реестр_data[1:]:
+                acc_val = str(row[6]).strip() if len(row) > 6 else ""
+                amt_val = str(row[4]).strip() if len(row) > 4 else ""
+                if not acc_val or not amt_val:
+                    continue
+                if _matches_account_strict(acc_val, "Основная касса (Сейф)"):
+                    parsed = parse_amount_from_registry(amt_val)
+                    if parsed is not None:
+                        ops_total += parsed
+                        ops_count += 1
+            dds = round(initial + ops_total, 2)
             return (
-                f"Основная касса (Сейф) на {today}: {dds:,.0f} тг\n"
+                f"Основная касса (Сейф) на {data_date}: {dds:,.0f} тг\n"
                 f"  Нач. остаток: {initial:,.0f} тг\n"
                 f"  + Обороты ({ops_count} оп.): {ops_total:,.0f} тг"
             )
@@ -1250,7 +1291,8 @@ def ask_ai(question: str) -> str:
         "11. Если указан конкретный счёт И дата — используй get_balance_on_date.\n"
         "12. Если спрашивают 'какого дня остаток X', 'когда был остаток X тг' — "
         "    используй find_date_by_balance_tool.\n"
-        f"13. В каждом финансовом ответе ОБЯЗАТЕЛЬНО указывай дату расчёта: {today}.\n"
+        "13. В финансовых ответах дата расчёта берётся из данных (дата последней операции), "
+        "    она уже включена в ответ инструментов — просто передай её пользователю.\n"
     )
 
     messages = [{"role": "user", "content": question}]
@@ -1337,9 +1379,27 @@ def ask_ai(question: str) -> str:
                     result_content = summary_text
 
                 elif tool_name == "get_seyf_balance":
-                    initial, ops_total, dds, ops_count = get_account_balance("Основная касса (Сейф)")
+                    spreadsheet = get_spreadsheet()
+                    реестр = spreadsheet.worksheet(SHEET_NAME)
+                    реестр_data = реестр.get_all_values()
+                    data_date = get_last_operation_date(реестр_data)
+                    initial_balances = _load_initial_balances()
+                    initial = _get_initial_for_account("Основная касса (Сейф)", initial_balances)
+                    ops_total = 0.0
+                    ops_count = 0
+                    for row in реестр_data[1:]:
+                        acc_val = str(row[6]).strip() if len(row) > 6 else ""
+                        amt_val = str(row[4]).strip() if len(row) > 4 else ""
+                        if not acc_val or not amt_val:
+                            continue
+                        if _matches_account_strict(acc_val, "Основная касса (Сейф)"):
+                            parsed = parse_amount_from_registry(amt_val)
+                            if parsed is not None:
+                                ops_total += parsed
+                                ops_count += 1
+                    dds = round(initial + ops_total, 2)
                     result_content = (
-                        f"Основная касса (Сейф) на {today}: {dds:,.2f} тг\n"
+                        f"Основная касса (Сейф) на {data_date}: {dds:,.2f} тг\n"
                         f"  Нач. остаток: {initial:,.2f} тг\n"
                         f"  + Обороты ({ops_count} оп.): {ops_total:,.2f} тг"
                     )
@@ -1908,6 +1968,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ Строк по счёту «{acc}» не найдено.")
                 return
             total = 0.0
+            реестр_data_for_date = get_spreadsheet().worksheet(SHEET_NAME).get_all_values()
+            data_date = get_last_operation_date(реестр_data_for_date)
             for _, row in matched:
                 try:
                     val = parse_amount_from_registry(row[4])
@@ -1915,10 +1977,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         total += val
                 except:
                     pass
-            today = datetime.now().strftime("%d.%m.%Y")
             header = (
                 f"📋 Счёт: {acc}\n"
-                f"На дату: {today}\n"
+                f"На дату: {data_date}\n"
                 f"Найдено строк: {len(matched)}\n"
                 f"Сумма операций: {total:,.2f} ₸\n"
                 f"{'─' * 35}\n"
